@@ -67,7 +67,10 @@ type ProxyService struct {
 	modelTestResults map[string]ModelAdapterTestResult
 }
 
-// NewProxyService 用于处理与 NewProxyService 相关的逻辑。
+// NewProxyService 创建本地代理服务门面，并初始化配置、证书、后端宿主和网络出口策略。
+// proxy 表示已有 MITM 代理实例；为空时会按用户配置延迟创建。
+// certManager 用于签发 Cursor 白名单域名的 MITM 证书。
+// caCertPEM 表示需要注入或展示给客户端信任链使用的 CA 证书内容。
 func NewProxyService(proxy *mitm.ProxyServer, certManager *certs.Manager, caCertPEM []byte) *ProxyService {
 	if err := appdata.EnsureAssistantHome(); err != nil {
 		logger.Errorf("ensure assistant home failed: %v", err)
@@ -85,11 +88,18 @@ func NewProxyService(proxy *mitm.ProxyServer, certManager *certs.Manager, caCert
 		modelTestResults: make(map[string]ModelAdapterTestResult),
 	}
 	service.store = serverconfig.NewStore(service.configPath, service.logsRoot)
+	// lyh用cursor修改 2026-07-27：服务创建阶段即加载出口代理配置，保证更新检查和测速等早期请求也能走 v2rayN。
+	if cfg, err := service.store.Load(context.Background()); err != nil {
+		logger.Errorf("load outbound proxy config failed: %v", err)
+	} else {
+		service.applyOutboundProxyConfig(cfg)
+	}
 	host, err := backend.NewHost(service.store)
 	if err != nil {
 		logger.Errorf("init backend host failed: %v", err)
 	} else {
 		service.backendHost = host
+		service.attachOutboundProxyConfigSubscription(host)
 	}
 	return service
 }
@@ -106,6 +116,12 @@ func (s *ProxyService) ensureBackendHost() error {
 		return err
 	}
 	s.backendHost = host
+	s.attachOutboundProxyConfigSubscription(host)
+	if cfg, loadErr := s.LoadUserConfig(); loadErr != nil {
+		logger.Errorf("load outbound proxy config failed: %v", loadErr)
+	} else {
+		s.applyOutboundProxyConfig(cfg)
+	}
 	return nil
 }
 
@@ -138,6 +154,31 @@ func (s *ProxyService) ensureProxy(cfg serverconfig.Config) error {
 	}
 	s.proxy = proxyServer
 	return nil
+}
+
+// lyh用cursor修改 2026-07-27：把持久化配置映射为 netproxy 运行时配置，统一控制所有外网出口请求。
+// applyOutboundProxyConfig 将用户配置中的出口代理策略应用到统一网络代理解析器。
+// cfg 表示当前标准化后的用户配置。
+func (s *ProxyService) applyOutboundProxyConfig(cfg serverconfig.Config) {
+	_ = s
+	netproxy.SetAppProxyConfig(netproxy.AppProxyConfig{
+		Enabled: cfg.OutboundProxy.Enabled,
+		Mode:    cfg.OutboundProxy.Mode,
+		URL:     cfg.OutboundProxy.URL,
+	})
+}
+
+// lyh用cursor修改 2026-07-27：订阅配置热更新，确保手动编辑配置文件后出口代理策略也能同步到运行时。
+// attachOutboundProxyConfigSubscription 将 backend 配置管理器的变更通知连接到 netproxy。
+// host 表示当前嵌入式 backend 实例。
+func (s *ProxyService) attachOutboundProxyConfigSubscription(host *backend.Host) {
+	if s == nil || host == nil || host.ConfigManager() == nil {
+		return
+	}
+	host.ConfigManager().Subscribe(func(cfg serverconfig.Config) {
+		s.applyOutboundProxyConfig(cfg)
+		s.emitState()
+	})
 }
 
 func (s *ProxyService) waitForBackend(ctx context.Context) error {

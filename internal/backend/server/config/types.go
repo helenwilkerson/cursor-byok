@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -18,7 +19,19 @@ const (
 	DefaultRoutingMode                      = "local"
 	DefaultProviderStreamIdleTimeoutSeconds = 240
 	MinProviderStreamIdleTimeoutSeconds     = 30
+	DefaultOutboundProxyMode                = "configured"
+	DefaultOutboundProxyURL                 = "http://127.0.0.1:19808"
 )
+
+// lyh用cursor修改 2026-07-27：为 Cursor 外网请求提供不依赖系统全局代理的应用内出口代理配置。
+type OutboundProxyConfig struct {
+	// Enabled 表示是否启用应用内固定出口代理。
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Mode 表示出口代理策略：configured、system 或 direct。
+	Mode string `json:"mode" yaml:"mode"`
+	// URL 表示 configured 策略下使用的代理地址。
+	URL string `json:"url" yaml:"url"`
+}
 
 type ModelAdapterConfig struct {
 	ID                          string `json:"id,omitempty" yaml:"-"`
@@ -58,10 +71,14 @@ type Config struct {
 	ProxyListenAddr           string               `json:"proxyListenAddr" yaml:"proxyListenAddr"`
 	ModelAdapters             []ModelAdapterConfig `json:"modelAdapters" yaml:"modelAdapters"`
 	Routing                   RoutingConfig        `json:"routing" yaml:"routing"`
-	HomeMetrics               HomeMetricsConfig    `json:"homeMetrics" yaml:"homeMetrics"`
-	LastAgentModelHash        string               `json:"lastAgentModelHash" yaml:"lastAgentModelHash"`
+	// lyh用cursor修改 2026-07-27：将外网出口代理纳入统一用户配置，避免依赖 Windows 系统全局代理。
+	OutboundProxy      OutboundProxyConfig  `json:"outboundProxy" yaml:"outboundProxy"`
+	HomeMetrics        HomeMetricsConfig    `json:"homeMetrics" yaml:"homeMetrics"`
+	LastAgentModelHash string               `json:"lastAgentModelHash" yaml:"lastAgentModelHash"`
 }
 
+// DefaultConfig 返回首次启动时使用的本地服务配置。
+// 默认会启用 v2rayN 常用本地 HTTP 代理端口，用户后续可在配置页调整。
 func DefaultConfig() Config {
 	return Config{
 		Log:                       false,
@@ -72,9 +89,18 @@ func DefaultConfig() Config {
 		Routing: RoutingConfig{
 			Mode: DefaultRoutingMode,
 		},
+		// lyh用cursor修改 2026-07-27：默认接入 v2rayN 本地 HTTP 代理，让 Cursor 无需开启系统代理也能访问外网。
+		OutboundProxy: OutboundProxyConfig{
+			Enabled: true,
+			Mode:    DefaultOutboundProxyMode,
+			URL:     DefaultOutboundProxyURL,
+		},
 	}
 }
 
+// NormalizeConfig 校验并补齐用户配置，使监听地址、运行模式、出口代理和模型渠道都可直接用于运行时。
+// input 表示从配置文件或前端保存请求读取到的原始配置。
+// 返回标准化后的配置；配置非法时返回面向用户的错误。
 func NormalizeConfig(input Config) (Config, error) {
 	output := DefaultConfig()
 	output.Log = input.Log
@@ -95,12 +121,58 @@ func NormalizeConfig(input Config) (Config, error) {
 	if output.Routing.Mode == "" {
 		output.Routing.Mode = DefaultRoutingMode
 	}
+	// lyh用cursor修改 2026-07-27：在配置标准化阶段校验出口代理策略，保证运行时代理解析只接收合法配置。
+	outboundProxy, err := NormalizeOutboundProxyConfig(input.OutboundProxy)
+	if err != nil {
+		return Config{}, err
+	}
+	output.OutboundProxy = outboundProxy
 	adapters, err := NormalizeModelAdapterConfigs(input.ModelAdapters)
 	if err != nil {
 		return Config{}, err
 	}
 	output.ModelAdapters = adapters
 	return output, nil
+}
+
+// lyh用cursor修改 2026-07-27：集中标准化出口代理配置，避免代理策略在调用方之间产生不一致。
+// NormalizeOutboundProxyConfig 将用户配置转换为运行时可直接使用的出口代理策略。
+// mode 为 configured 时会校验代理 URL；mode 为 system 或 direct 时不会使用 URL。
+// 返回标准化后的出口代理配置，配置非法时返回错误。
+func NormalizeOutboundProxyConfig(input OutboundProxyConfig) (OutboundProxyConfig, error) {
+	mode := normalizeOutboundProxyMode(input.Mode)
+	if mode == "" {
+		return OutboundProxyConfig{}, errors.New("外网出口代理 mode 仅支持 configured、system 或 direct")
+	}
+
+	enabled := input.Enabled
+	if strings.TrimSpace(input.Mode) == "" && strings.TrimSpace(input.URL) == "" && !input.Enabled {
+		enabled = true
+	}
+	if mode != "configured" {
+		enabled = false
+	}
+	proxyURL := strings.TrimSpace(input.URL)
+	if mode == "configured" {
+		if proxyURL == "" {
+			proxyURL = DefaultOutboundProxyURL
+		}
+		normalizedURL, err := normalizeOutboundProxyURL(proxyURL)
+		if err != nil {
+			return OutboundProxyConfig{}, err
+		}
+		return OutboundProxyConfig{
+			Enabled: enabled,
+			Mode:    mode,
+			URL:     normalizedURL,
+		}, nil
+	}
+
+	return OutboundProxyConfig{
+		Enabled: enabled,
+		Mode:    mode,
+		URL:     "",
+	}, nil
 }
 
 func NormalizeModelAdapterConfigs(input []ModelAdapterConfig) ([]ModelAdapterConfig, error) {
@@ -290,4 +362,36 @@ func normalizeRoutingMode(value string) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeOutboundProxyMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "configured":
+		return "configured"
+	case "system":
+		return "system"
+	case "direct":
+		return "direct"
+	default:
+		return ""
+	}
+}
+
+func normalizeOutboundProxyURL(value string) (string, error) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "", errors.New("外网出口代理 url 不能为空")
+	}
+	parsed, err := url.Parse(text)
+	if err != nil || parsed == nil || strings.TrimSpace(parsed.Host) == "" {
+		return "", errors.New("外网出口代理 url 必须是合法代理地址")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	switch scheme {
+	case "http", "https", "socks5":
+		parsed.Scheme = scheme
+	default:
+		return "", errors.New("外网出口代理 url 仅支持 http、https 或 socks5")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }

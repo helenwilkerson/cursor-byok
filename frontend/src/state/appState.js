@@ -37,6 +37,8 @@ export const CUSTOM_HEADERS_DEFAULT_JSON = `{
 }`;
 const SUPPORTED_OPENAI_ENDPOINTS = new Set([OPENAI_ENDPOINT_RESPONSES, OPENAI_ENDPOINT_CHAT_COMPLETIONS, OPENAI_ENDPOINT_CUSTOM]);
 const SUPPORTED_ROUTE_MODES = new Set(["local", "upstream"]);
+const SUPPORTED_OUTBOUND_PROXY_MODES = new Set(["configured", "system", "direct"]);
+const DEFAULT_OUTBOUND_PROXY_URL = "http://127.0.0.1:19808";
 const PROXY_STATE_EVENT = "proxy:state";
 const USER_CONFIG_CHANGED_EVENT = "user-config:changed";
 const UPDATE_STATE_EVENT = "update:state";
@@ -132,6 +134,62 @@ function normalizeRouteMode(value, fallback = "local") {
     return text;
   }
   return fallback;
+}
+
+/**
+ * 标准化外网出口代理模式。
+ * @param {string} value 用户选择或配置文件中的代理模式。
+ * @param {string} fallback 无法识别模式时使用的默认模式。
+ * @returns {string} 返回 configured、system 或 direct。
+ */
+function normalizeOutboundProxyMode(value, fallback = "configured") {
+  const text = asString(value).toLowerCase();
+  if (SUPPORTED_OUTBOUND_PROXY_MODES.has(text)) {
+    return text;
+  }
+  return fallback;
+}
+
+/**
+ * 标准化外网出口代理地址。
+ * @param {string} value 用户输入的代理地址。
+ * @param {string} fallback 用户未输入地址时使用的默认地址。
+ * @returns {string} 返回可保存的代理地址；协议非法或 URL 非法时返回空字符串。
+ */
+function normalizeProxyURL(value, fallback = DEFAULT_OUTBOUND_PROXY_URL) {
+  const text = asString(value) || fallback;
+  try {
+    const parsed = new URL(text);
+    if (!["http:", "https:", "socks5:"].includes(parsed.protocol)) {
+      return "";
+    }
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString().replace(/\/+$/, "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+// lyh用cursor修改 2026-07-27：统一前端出口代理配置归一化，确保保存到后端的策略与运行时 netproxy 语义一致。
+/**
+ * 标准化外网出口代理配置。
+ * @param {Object} source 配置文件、缓存或页面状态中的出口代理配置。
+ * @returns {{enabled: boolean, mode: string, url: string}} 返回可提交给后端的出口代理配置。
+ */
+function normalizeOutboundProxy(source) {
+  const raw = source && typeof source === "object" ? source : {};
+  const mode = normalizeOutboundProxyMode(raw.mode);
+  const rawURL = asString(raw.url);
+  const url = mode === "configured"
+    ? normalizeProxyURL(rawURL, rawURL ? "" : DEFAULT_OUTBOUND_PROXY_URL) || rawURL || DEFAULT_OUTBOUND_PROXY_URL
+    : "";
+  const enabled = mode === "configured" ? asBoolean(raw.enabled, true) : false;
+  return {
+    enabled,
+    mode,
+    url,
+  };
 }
 
 function normalizeBaseURL(value) {
@@ -483,6 +541,13 @@ function validateConfigPayload(payload) {
   if (!SUPPORTED_ROUTE_MODES.has(normalizeRouteMode(payload?.routing?.mode, ""))) {
     return "运行模式仅支持 local 或 upstream";
   }
+  const outboundProxy = normalizeOutboundProxy(payload?.outboundProxy);
+  if (!SUPPORTED_OUTBOUND_PROXY_MODES.has(outboundProxy.mode)) {
+    return "外网出口代理模式仅支持 configured、system 或 direct";
+  }
+  if (outboundProxy.mode === "configured" && outboundProxy.enabled && !normalizeProxyURL(outboundProxy.url, "")) {
+    return "外网出口代理地址仅支持 http、https 或 socks5";
+  }
   return "";
 }
 
@@ -529,9 +594,22 @@ function loadCachedState() {
   }
 }
 
+/**
+ * 将配置文件、Wails 返回值或页面状态统一归一化为前端内部配置结构。
+ * @param {Object} source 配置文件、缓存或响应中的原始配置对象。
+ * @returns {Object} 返回可直接用于页面状态和保存请求的配置对象。
+ */
 function normalizeConfig(source) {
   const raw = source && typeof source === "object" ? source : {};
   const routing = raw.routing && typeof raw.routing === "object" ? raw.routing : {};
+  // lyh用cursor修改 2026-07-27：兼容页面状态字段，避免配置窗口刷新后丢失外网出口代理选择。
+  const outboundProxy = raw.outboundProxy && typeof raw.outboundProxy === "object"
+    ? raw.outboundProxy
+    : {
+      enabled: raw.outboundProxyEnabled,
+      mode: raw.outboundProxyMode,
+      url: raw.outboundProxyURL,
+    };
   const homeMetrics = raw.homeMetrics && typeof raw.homeMetrics === "object" ? raw.homeMetrics : {};
   return {
     log: asBoolean(raw.log),
@@ -542,6 +620,7 @@ function normalizeConfig(source) {
     routing: {
       mode: normalizeRouteMode(routing.mode),
     },
+    outboundProxy: normalizeOutboundProxy(outboundProxy),
     homeMetrics: {
       includeCacheWriteInHitRate: asBoolean(homeMetrics.includeCacheWriteInHitRate),
     },
@@ -585,6 +664,8 @@ function buildConfigPayload(source = appState) {
     proxyListenAddr: normalized.proxyListenAddr,
     modelAdapters: normalized.modelAdapters.map(({ id, ...adapter }) => adapter),
     routing: normalized.routing,
+    // lyh用cursor修改 2026-07-27：保存配置时携带外网出口代理策略，确保后端 netproxy 能立即切换到 v2rayN。
+    outboundProxy: normalized.outboundProxy,
     homeMetrics: normalized.homeMetrics,
     lastAgentModelHash: normalized.lastAgentModelHash,
   };
@@ -600,6 +681,10 @@ function applyConfigToState(config, { modelAdaptersOnly = false } = {}) {
   appState.configBackendListenAddr = normalized.backendListenAddr;
   appState.configProxyListenAddr = normalized.proxyListenAddr;
   appState.routingMode = normalized.routing.mode;
+  // lyh用cursor修改 2026-07-27：加载配置时同步外网出口代理页面状态，避免保存时覆盖用户代理选择。
+  appState.outboundProxyEnabled = normalized.outboundProxy.enabled;
+  appState.outboundProxyMode = normalized.outboundProxy.mode;
+  appState.outboundProxyURL = normalized.outboundProxy.url;
   appState.includeCacheWriteInHitRate = normalized.homeMetrics.includeCacheWriteInHitRate;
   return normalized;
 }
@@ -658,8 +743,10 @@ function applyProxyState(raw) {
   appState.netProxyActive = asBoolean(state.netProxyActive);
   appState.netProxyUsingSystem = asBoolean(state.netProxyUsingSystem);
   appState.netProxyUsingEnv = asBoolean(state.netProxyUsingEnv);
+  appState.netProxyUsingConfigured = asBoolean(state.netProxyUsingConfigured);
   appState.netProxyHttp = asString(state.netProxyHttp);
   appState.netProxyHttps = asString(state.netProxyHttps);
+  appState.netProxyConfiguredURL = asString(state.netProxyConfiguredURL);
   appState.netProxyPacIgnored = asBoolean(state.netProxyPacIgnored);
   appState.netProxyDescription = asString(state.netProxyDescription);
 }
@@ -831,6 +918,9 @@ export const appState = reactive({
   configBackendListenAddr: cachedConfig.backendListenAddr,
   configProxyListenAddr: cachedConfig.proxyListenAddr,
   routingMode: cachedConfig.routing.mode,
+  outboundProxyEnabled: cachedConfig.outboundProxy.enabled,
+  outboundProxyMode: cachedConfig.outboundProxy.mode,
+  outboundProxyURL: cachedConfig.outboundProxy.url,
   includeCacheWriteInHitRate: cachedConfig.homeMetrics.includeCacheWriteInHitRate,
 
   serviceRunning: asBoolean(cachedState.serviceRunning),
@@ -846,8 +936,10 @@ export const appState = reactive({
   netProxyActive: asBoolean(cachedState.netProxyActive),
   netProxyUsingSystem: asBoolean(cachedState.netProxyUsingSystem),
   netProxyUsingEnv: asBoolean(cachedState.netProxyUsingEnv),
+  netProxyUsingConfigured: asBoolean(cachedState.netProxyUsingConfigured),
   netProxyHttp: asString(cachedState.netProxyHttp),
   netProxyHttps: asString(cachedState.netProxyHttps),
+  netProxyConfiguredURL: asString(cachedState.netProxyConfiguredURL),
   netProxyPacIgnored: asBoolean(cachedState.netProxyPacIgnored),
   netProxyDescription: asString(cachedState.netProxyDescription),
 
@@ -893,8 +985,10 @@ watchSyncEffect(() => {
         netProxyActive: appState.netProxyActive,
         netProxyUsingSystem: appState.netProxyUsingSystem,
         netProxyUsingEnv: appState.netProxyUsingEnv,
+        netProxyUsingConfigured: appState.netProxyUsingConfigured,
         netProxyHttp: appState.netProxyHttp,
         netProxyHttps: appState.netProxyHttps,
+        netProxyConfiguredURL: appState.netProxyConfiguredURL,
         netProxyPacIgnored: appState.netProxyPacIgnored,
         netProxyDescription: appState.netProxyDescription,
       }),
@@ -1121,11 +1215,45 @@ export async function persistUserConfig() {
     routing: {
       mode: appState.routingMode,
     },
+    outboundProxy: {
+      enabled: appState.outboundProxyEnabled,
+      mode: appState.outboundProxyMode,
+      url: appState.outboundProxyURL,
+    },
     homeMetrics: {
       ...currentConfig.homeMetrics,
       includeCacheWriteInHitRate: appState.includeCacheWriteInHitRate,
     },
   });
+}
+
+// lyh用cursor修改 2026-07-27：提供主界面出口代理保存入口，让用户无需打开配置窗口即可修改 v2rayN 端口。
+/**
+ * 保存主界面编辑的外网出口代理配置。
+ * @param {{enabled?: boolean, mode?: string, url?: string}} outboundProxy 用户在主界面选择的出口代理策略。
+ * @returns {Promise<{ok: boolean, error: string}>} 返回保存结果；失败时包含可展示给用户的错误信息。
+ */
+export async function saveOutboundProxyConfig(outboundProxy) {
+  const currentConfig = await loadPersistedUserConfig();
+  const previousProxy = {
+    enabled: appState.outboundProxyEnabled,
+    mode: appState.outboundProxyMode,
+    url: appState.outboundProxyURL,
+  };
+  const nextProxy = normalizeOutboundProxy(outboundProxy);
+  appState.outboundProxyEnabled = nextProxy.enabled;
+  appState.outboundProxyMode = nextProxy.mode;
+  appState.outboundProxyURL = nextProxy.url;
+  const result = await persistConfigPayload({
+    ...currentConfig,
+    outboundProxy: nextProxy,
+  });
+  if (!result.ok) {
+    appState.outboundProxyEnabled = previousProxy.enabled;
+    appState.outboundProxyMode = previousProxy.mode;
+    appState.outboundProxyURL = previousProxy.url;
+  }
+  return result;
 }
 
 export async function saveIncludeCacheWriteInHitRate(value) {

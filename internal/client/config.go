@@ -31,7 +31,9 @@ func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 	return s.store.Load(ctx)
 }
 
-// SaveUserConfig 用于处理与 SaveUserConfig 相关的逻辑。
+// SaveUserConfig 保存用户配置，并把会影响运行时的配置立即同步到当前服务。
+// cfg 表示前端提交的完整用户配置。
+// 保存成功后会广播配置和代理状态变化，便于前端刷新展示。
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	if s == nil {
 		return nil
@@ -55,7 +57,10 @@ func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	if err != nil {
 		return err
 	}
+	// lyh用cursor修改 2026-07-27：保存配置后立即刷新出口代理，使新建请求无需重启即可切换到 v2rayN。
+	s.applyOutboundProxyConfig(normalized)
 	s.emitUserConfigChanged(normalized)
+	s.emitState()
 	return nil
 }
 

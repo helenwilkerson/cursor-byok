@@ -40,10 +40,14 @@ type ProxyState struct {
 	NetProxyUsingSystem bool `json:"netProxyUsingSystem"`
 	// NetProxyUsingEnv 表示当前出站网络代理是否来自环境变量。
 	NetProxyUsingEnv bool `json:"netProxyUsingEnv"`
+	// NetProxyUsingConfigured 表示当前出站网络代理是否来自应用内出口代理配置。
+	NetProxyUsingConfigured bool `json:"netProxyUsingConfigured"`
 	// NetProxyHTTP 表示当前 HTTP 代理地址，已移除凭据。
 	NetProxyHTTP string `json:"netProxyHttp"`
 	// NetProxyHTTPS 表示当前 HTTPS 代理地址，已移除凭据。
 	NetProxyHTTPS string `json:"netProxyHttps"`
+	// NetProxyConfiguredURL 表示应用内出口代理地址，已移除凭据。
+	NetProxyConfiguredURL string `json:"netProxyConfiguredURL"`
 	// NetProxyPACIgnored 表示检测到 PAC/自动代理但本轮按直连处理。
 	NetProxyPACIgnored bool `json:"netProxyPacIgnored"`
 	// NetProxyDescription 表示当前出站网络代理摘要，已移除凭据。
@@ -52,7 +56,9 @@ type ProxyState struct {
 	LastError string `json:"lastError"`
 }
 
-// StartProxy 用于处理与 StartProxy 相关的逻辑。
+// StartProxy 启动嵌入式 backend、MITM 代理并向 Cursor 注入本地代理设置。
+// 启动前会先应用当前出口代理配置，确保 Cursor 首次外网请求走用户选择的出口。
+// 返回启动后的服务状态；任一关键步骤失败时返回失败状态和具体错误。
 func (s *ProxyService) StartProxy() (ProxyState, error) {
 	logger.Infof("start service requested config_path=%s logs_root=%s", s.configPath, s.logsRoot)
 	fail := func(step string, err error) (ProxyState, error) {
@@ -65,6 +71,8 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 	if err != nil {
 		return fail("load_user_config", err)
 	}
+	// lyh用cursor修改 2026-07-27：启动服务前刷新应用内出口代理，避免 Cursor 首个外网请求仍按系统代理解析。
+	s.applyOutboundProxyConfig(cfg)
 	if err := s.ensureBackendHost(); err != nil {
 		return fail("ensure_backend_host", err)
 	}
@@ -181,6 +189,7 @@ func (s *ProxyService) GetState() ProxyState {
 		backendListenAddr = s.backendHost.ListenAddr()
 		backendRunning = s.backendHost.IsRunning()
 	}
+	// lyh用cursor修改 2026-07-27：将应用内出口代理命中状态透传给前端，便于确认 Cursor 是否走 v2rayN。
 	netProxy := netproxy.CurrentStatus()
 	return ProxyState{
 		ListenAddr:            proxySnap.ListenAddr,
@@ -190,15 +199,17 @@ func (s *ProxyService) GetState() ProxyState {
 		ProxyListenAddr:       proxySnap.ListenAddr,
 		ProxyRunning:          proxySnap.Running,
 		CursorSettingsApplied: cursorSettingsApplied,
-		NetProxySource:        netProxy.Source,
-		NetProxyActive:        netProxy.Active,
-		NetProxyUsingSystem:   netProxy.UsingSystemProxy,
-		NetProxyUsingEnv:      netProxy.UsingEnvProxy,
-		NetProxyHTTP:          netProxy.HTTPProxy,
-		NetProxyHTTPS:         netProxy.HTTPSProxy,
-		NetProxyPACIgnored:    netProxy.PACIgnored,
-		NetProxyDescription:   netProxy.Description,
-		LastError:             lastError,
+		NetProxySource:          netProxy.Source,
+		NetProxyActive:          netProxy.Active,
+		NetProxyUsingSystem:     netProxy.UsingSystemProxy,
+		NetProxyUsingEnv:        netProxy.UsingEnvProxy,
+		NetProxyUsingConfigured: netProxy.UsingConfiguredProxy,
+		NetProxyHTTP:            netProxy.HTTPProxy,
+		NetProxyHTTPS:           netProxy.HTTPSProxy,
+		NetProxyConfiguredURL:   netProxy.ConfiguredProxyURL,
+		NetProxyPACIgnored:      netProxy.PACIgnored,
+		NetProxyDescription:     netProxy.Description,
+		LastError:               lastError,
 	}
 }
 

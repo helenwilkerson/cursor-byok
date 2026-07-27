@@ -60,6 +60,9 @@ func (store *Store) snapshot() fileSnapshot {
 	}
 }
 
+// Load 读取用户配置文件并返回标准化配置。
+// 配置文件不存在时会创建默认配置；旧配置缺少关键字段时会自动补齐并落盘。
+// ctx 当前未用于 IO 控制，保留用于调用方接口一致性。
 func (store *Store) Load(_ context.Context) (Config, error) {
 	if store == nil || strings.TrimSpace(store.path) == "" {
 		return DefaultConfig(), nil
@@ -96,6 +99,9 @@ func (store *Store) Load(_ context.Context) (Config, error) {
 	return normalized, nil
 }
 
+// Save 标准化并持久化用户配置。
+// cfg 表示前端或调用方提交的完整配置。
+// 返回最终落盘的标准化配置，便于调用方刷新运行时状态。
 func (store *Store) Save(_ context.Context, cfg Config) (Config, error) {
 	if store == nil || strings.TrimSpace(store.path) == "" {
 		return Config{}, errors.New("配置存储未初始化")
@@ -136,10 +142,14 @@ func (store *Store) saveLocked(normalized Config) error {
 }
 
 func shouldPersistNormalizedConfig(raw []byte, current Config, normalized Config) bool {
-	if !yamlHasKey(raw, "backendListenAddr") || !yamlHasKey(raw, "proxyListenAddr") {
+	if !yamlHasKey(raw, "backendListenAddr") || !yamlHasKey(raw, "proxyListenAddr") || !yamlHasKey(raw, "outboundProxy") {
 		return true
 	}
 	if current.BackendListenAddr != normalized.BackendListenAddr || current.ProxyListenAddr != normalized.ProxyListenAddr {
+		return true
+	}
+	// lyh用cursor修改 2026-07-27：旧配置或非标准出口代理配置加载后立即落盘，确保应用内代理策略可追溯。
+	if current.OutboundProxy != normalized.OutboundProxy {
 		return true
 	}
 	if current.ProviderStreamIdleTimeout == normalized.ProviderStreamIdleTimeout {

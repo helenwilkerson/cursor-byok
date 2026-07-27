@@ -26,7 +26,16 @@ var (
 	initialDefaultTransport = cloneDefaultTransport()
 	defaultResolver         = &proxyResolver{}
 	proxyTransports         sync.Map
+	appProxyMu             sync.RWMutex
+	appProxyConfig          AppProxyConfig
 )
+
+// lyh用cursor修改 2026-07-27：提供运行时可更新的应用内出口代理配置，避免只能依赖环境变量或系统代理。
+type AppProxyConfig struct {
+	Enabled bool
+	Mode    string
+	URL     string
+}
 
 // InstallDefaultTransport makes clients with a nil Transport use the same
 // proxy resolution as clients created through this package.
@@ -43,6 +52,25 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: NewTransport(nil),
 		Timeout:   timeout,
+	}
+}
+
+// lyh用cursor修改 2026-07-27：同步用户配置中的出口代理策略，让所有复用 netproxy 的 HTTP 客户端即时切换出口。
+// SetAppProxyConfig 更新应用内出口代理配置。
+// cfg.Mode 支持 configured、system 和 direct；configured 会优先使用 cfg.URL。
+// 已有空闲连接会被关闭，确保后续请求使用新的代理策略。
+func SetAppProxyConfig(cfg AppProxyConfig) {
+	next := AppProxyConfig{
+		Enabled: cfg.Enabled,
+		Mode:    strings.ToLower(strings.TrimSpace(cfg.Mode)),
+		URL:     strings.TrimSpace(cfg.URL),
+	}
+	appProxyMu.Lock()
+	changed := appProxyConfig != next
+	appProxyConfig = next
+	appProxyMu.Unlock()
+	if changed {
+		defaultResolver.logCurrentSnapshot("app proxy config updated")
 	}
 }
 
@@ -85,6 +113,7 @@ type proxySnapshot struct {
 	key            string
 	httpProxy      string
 	httpsProxy     string
+	configuredURL  string
 	proxyFunc      func(*url.URL) (*url.URL, error)
 	systemBypass   []string
 	excludeSimple  bool
@@ -94,15 +123,17 @@ type proxySnapshot struct {
 
 // Status is a sanitized summary of the proxy resolver's current decision.
 type Status struct {
-	Source           string `json:"source"`
-	Active           bool   `json:"active"`
-	UsingSystemProxy bool   `json:"usingSystemProxy"`
-	UsingEnvProxy    bool   `json:"usingEnvProxy"`
-	HTTPProxy        string `json:"httpProxy"`
-	HTTPSProxy       string `json:"httpsProxy"`
-	Description      string `json:"description"`
-	PACIgnored       bool   `json:"pacIgnored"`
-	LoadError        string `json:"loadError"`
+	Source                 string `json:"source"`
+	Active                 bool   `json:"active"`
+	UsingSystemProxy       bool   `json:"usingSystemProxy"`
+	UsingEnvProxy          bool   `json:"usingEnvProxy"`
+	UsingConfiguredProxy   bool   `json:"usingConfiguredProxy"`
+	HTTPProxy              string `json:"httpProxy"`
+	HTTPSProxy             string `json:"httpsProxy"`
+	ConfiguredProxyURL     string `json:"configuredProxyURL"`
+	Description            string `json:"description"`
+	PACIgnored             bool   `json:"pacIgnored"`
+	LoadError              string `json:"loadError"`
 }
 
 type systemProxyConfig struct {
@@ -157,9 +188,24 @@ func (resolver *proxyResolver) logCurrentSnapshot(prefix string) {
 	resolver.mu.Unlock()
 }
 
+// appProxyMode 返回当前应用内出口策略，用于决定是否允许环境变量代理参与回退。
+func appProxyMode() string {
+	appProxyMu.RLock()
+	mode := strings.ToLower(strings.TrimSpace(appProxyConfig.Mode))
+	appProxyMu.RUnlock()
+	return mode
+}
+
 func buildProxySnapshot(now time.Time) proxySnapshot {
-	if cfg, ok := envProxyConfig(); ok {
-		return snapshotFromConfig(now, "env", cfg, nil, false, false, "")
+	// lyh用cursor修改 2026-07-27：优先使用应用内出口代理，避免 Cursor 外网请求被系统代理状态影响。
+	if snapshot, ok := appProxySnapshot(now); ok {
+		return snapshot
+	}
+
+	if appProxyMode() != "system" {
+		if cfg, ok := envProxyConfig(); ok {
+			return snapshotFromConfig(now, "env", cfg, nil, false, false, "")
+		}
 	}
 
 	systemConfig := loadSystemProxyConfig()
@@ -224,6 +270,45 @@ func snapshotFromConfig(now time.Time, source string, cfg httpproxy.Config, bypa
 		pacIgnored:     pacIgnored,
 		loadErrMessage: loadErr,
 	}
+}
+
+// lyh用cursor修改 2026-07-27：将应用内出口代理策略置于环境变量和系统代理之前，保证 v2rayN 本地端口优先生效。
+// appProxySnapshot 根据当前应用内代理配置生成代理解析快照。
+// now 用于计算快照缓存过期时间。
+// 返回值包含代理快照，以及本次是否由应用内配置接管代理解析。
+func appProxySnapshot(now time.Time) (proxySnapshot, bool) {
+	appProxyMu.RLock()
+	cfg := appProxyConfig
+	appProxyMu.RUnlock()
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	switch mode {
+	case "direct":
+		return proxySnapshot{
+			expiresAt:   now.Add(proxyCacheTTL),
+			source:      "direct",
+			description: "source=direct app_proxy=direct",
+			key:         "app|direct",
+		}, true
+	case "system", "":
+		return proxySnapshot{}, false
+	case "configured":
+		if !cfg.Enabled {
+			return proxySnapshot{}, false
+		}
+	}
+	proxyURL := strings.TrimSpace(cfg.URL)
+	if proxyURL == "" {
+		return proxySnapshot{}, false
+	}
+	proxyConfig := httpproxy.Config{
+		HTTPProxy:  proxyURL,
+		HTTPSProxy: proxyURL,
+		NoProxy:    joinNoProxy(alwaysNoProxyList, envNoProxy()),
+	}
+	snapshot := snapshotFromConfig(now, "configured", proxyConfig, nil, false, false, "")
+	snapshot.configuredURL = sanitizeProxyValue(proxyURL)
+	snapshot.key = strings.Join([]string{snapshot.key, snapshot.configuredURL}, "|")
+	return snapshot, true
 }
 
 func envProxyConfig() (httpproxy.Config, bool) {
@@ -295,16 +380,19 @@ func statusFromSnapshot(snapshot proxySnapshot) Status {
 	if source == "" || source == "none" || source == "system-pac-ignored" {
 		source = "direct"
 	}
+	// lyh用cursor修改 2026-07-27：在代理状态中暴露 configured 命中信息，便于确认请求是否走 v2rayN。
 	return Status{
-		Source:           source,
-		Active:           snapshot.active,
-		UsingSystemProxy: snapshot.active && snapshot.source == "system",
-		UsingEnvProxy:    snapshot.active && snapshot.source == "env",
-		HTTPProxy:        snapshot.httpProxy,
-		HTTPSProxy:       snapshot.httpsProxy,
-		Description:      snapshot.description,
-		PACIgnored:       snapshot.pacIgnored,
-		LoadError:        snapshot.loadErrMessage,
+		Source:               source,
+		Active:               snapshot.active,
+		UsingSystemProxy:     snapshot.active && snapshot.source == "system",
+		UsingEnvProxy:        snapshot.active && snapshot.source == "env",
+		UsingConfiguredProxy: snapshot.active && snapshot.source == "configured",
+		HTTPProxy:            snapshot.httpProxy,
+		HTTPSProxy:           snapshot.httpsProxy,
+		ConfiguredProxyURL:   snapshot.configuredURL,
+		Description:          snapshot.description,
+		PACIgnored:           snapshot.pacIgnored,
+		LoadError:            snapshot.loadErrMessage,
 	}
 }
 

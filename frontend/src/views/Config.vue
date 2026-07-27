@@ -2,7 +2,9 @@
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
 import LocaleSelect from "@/components/LocaleSelect.vue";
+import Input from "@/components/ui/Input.vue";
 import Select from "@/components/ui/Select.vue";
+import Switch from "@/components/ui/Switch.vue";
 import { showModal } from "@/composables/useModal";
 import {
   appState,
@@ -77,6 +79,47 @@ onMounted(async () => {
             v-model="appState.routingMode"
             :options="routeModeOptions"
             placeholder="选择模式"
+          />
+        </div>
+      </div>
+    </Card>
+
+    <!-- lyh用cursor修改 2026-07-27：新增外网出口代理配置入口，让 Cursor 可在非系统全局代理模式下走 v2rayN。 -->
+    <Card>
+      <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0 flex-1">
+          <h2 class="text-base font-medium text-white">外网出口代理</h2>
+          <div class="mt-1 text-sm text-[#a3a3a3]">
+            启用后，本项目转发 Cursor 外网请求时会优先走该代理，不需要 v2rayN 开启系统全局代理
+          </div>
+          <div class="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+            <Input
+              v-model="appState.outboundProxyURL"
+              :disabled="!appState.outboundProxyEnabled || appState.outboundProxyMode !== 'configured'"
+              placeholder="http://127.0.0.1:19808"
+            />
+            <Select
+              v-model="appState.outboundProxyMode"
+              :options="[
+                { label: '应用内代理', value: 'configured' },
+                { label: '跟随系统代理', value: 'system' },
+                { label: '直连', value: 'direct' },
+              ]"
+              placeholder="选择出口模式"
+            />
+          </div>
+          <div class="mt-2 text-xs text-[#8f8f8f]">
+            当前出口：{{ appState.netProxyDescription || '尚未检测' }}
+          </div>
+        </div>
+        <div class="w-[180px] shrink-0">
+          <Switch
+            label="应用内代理"
+            :enabled="appState.outboundProxyEnabled"
+            :disabled="appState.outboundProxyMode !== 'configured'"
+            enabled-text="已优先使用"
+            disabled-text="未启用"
+            @change="appState.outboundProxyEnabled = $event"
           />
         </div>
       </div>
