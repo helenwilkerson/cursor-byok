@@ -206,9 +206,10 @@ func Run(resources EmbeddedResources) error {
 	windowService.SetUpdater(updateManager)
 
 	mainWindow = app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:               appName,
+		Title: appName,
+		// lyh用cursor修改 2026-07-27：提高主窗口默认高度，确保主界面代理配置卡片无需滚动即可展示。
 		Width:               700,
-		Height:              520,
+		Height:              750,
 		MinWidth:            640,
 		MinHeight:           480,
 		DisableResize:       false,
