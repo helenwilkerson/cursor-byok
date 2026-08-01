@@ -1,23 +1,17 @@
 package app
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"io/fs"
-	"net"
 	goruntime "runtime"
 	"strings"
 	"time"
 
-	"cursor/internal/ads"
-	"cursor/internal/appdata"
 	serverconfig "cursor/internal/backend/server/config"
 	"cursor/internal/buildinfo"
-	"cursor/internal/cursor"
-	"cursor/internal/historymetrics"
 
 	"github.com/leaanthony/u"
 
@@ -26,18 +20,12 @@ import (
 	"cursor/internal/logger"
 	"cursor/internal/mitm"
 	"cursor/internal/netproxy"
-	"cursor/internal/updater"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
-const (
-	// appName 表示当前模块中的 appName 状态值。
-	appName = "Cursor助手"
-	// adRefreshInterval 表示后台广告拉取间隔。
-	adRefreshInterval = 3 * time.Minute
-)
+const appName = "Cursor助手"
 
 // EmbeddedResources 定义了当前模块中的 EmbeddedResources 类型。
 type EmbeddedResources struct {
@@ -54,14 +42,10 @@ func init() {
 	application.RegisterEvent[bridge.ProxyState]("proxy:state")
 	application.RegisterEvent[bridge.UserConfig]("user-config:changed")
 	application.RegisterEvent[bridge.ModelAdapterTestResultsPayload]("model-adapter-test:updated")
-	application.RegisterEvent[bridge.AdRuntime](ads.EventUpdated)
-	application.RegisterEvent[updater.StatePayload](updater.EventState)
-	application.RegisterEvent[updater.ProgressPayload](updater.EventProgress)
-	application.RegisterEvent[updater.ReadyPayload](updater.EventReady)
-	application.RegisterEvent[updater.ErrorPayload](updater.EventError)
 }
 
-// Run 用于处理与 Run 相关的逻辑。
+// Run 初始化桌面应用、注册桥接服务并创建主窗口与系统托盘。
+// resources 提供前端静态资源及应用图标；返回值表示应用初始化或运行期间的错误。
 func Run(resources EmbeddedResources) error {
 	logger.Init()
 	netproxy.InstallDefaultTransport()
@@ -80,47 +64,10 @@ func Run(resources EmbeddedResources) error {
 		return err
 	}
 	proxyService := bridge.NewProxyService(proxyServer, certManager, embeddedCACertPEM)
-	adAssetBaseURL := defaultBackendBaseURL
-	if cfg, err := proxyService.LoadUserConfig(); err == nil {
-		adAssetBaseURL = browserReachableLoopbackBaseURL(cfg.BackendListenAddr)
-	}
 	metricsService := bridge.NewMetricsService()
 	windowService := bridge.NewWindowService()
-	adCore := ads.NewService(ads.Options{
-		StoreRoot:    appdata.AdsRootPath(),
-		HTTPClient:   netproxy.NewHTTPClient(30 * time.Second),
-		AppVersion:   buildinfo.CurrentVersion(),
-		AssetBaseURL: adAssetBaseURL + ads.RoutePrefix,
-		DeviceID:     cursor.GetDeviceID,
-		Metrics: func(context.Context) (ads.MetricsSnapshot, error) {
-			if err := appdata.EnsureAssistantHome(); err != nil {
-				return ads.MetricsSnapshot{}, err
-			}
-			summary, err := historymetrics.LoadUsageSummary(appdata.UsageFilePath())
-			if err != nil {
-				return ads.MetricsSnapshot{}, err
-			}
-			return ads.MetricsSnapshot{
-				TurnsTotal:         summary.TurnsTotal,
-				RequestTokensTotal: summary.RequestTokensTotal,
-				PromptTokensTotal:  summary.PromptTokensTotal,
-				CacheReadTokens:    summary.CacheReadTokens,
-				CacheWriteTokens:   summary.CacheWriteTokens,
-			}, nil
-		},
-		ProviderCount: func(context.Context) (int, error) {
-			cfg, err := proxyService.LoadUserConfig()
-			if err != nil {
-				return 0, err
-			}
-			return len(cfg.ModelAdapters), nil
-		},
-	})
-	adService := bridge.NewAdService(adCore)
-	var updateManager *updater.Manager
 
 	var mainWindow *application.WebviewWindow
-	adRefreshCtx, stopAdRefresh := context.WithCancel(context.Background())
 
 	app := application.New(application.Options{
 		Name:        appName,
@@ -129,7 +76,6 @@ func Run(resources EmbeddedResources) error {
 			application.NewService(proxyService),
 			application.NewService(metricsService),
 			application.NewService(windowService),
-			application.NewService(adService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(resources.Assets),
@@ -139,10 +85,6 @@ func Run(resources EmbeddedResources) error {
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
 		OnShutdown: func() {
-			stopAdRefresh()
-			if updateManager != nil {
-				updateManager.Shutdown()
-			}
 			proxyService.ShutdownForQuit()
 		},
 		SingleInstance: &application.SingleInstanceOptions{
@@ -154,64 +96,15 @@ func Run(resources EmbeddedResources) error {
 		},
 	})
 
-	refreshAdAssetBaseURL := func() bool {
-		state := proxyService.GetState()
-		backendListenAddr := strings.TrimSpace(state.BackendListenAddr)
-		if backendListenAddr == "" {
-			backendListenAddr = serverconfig.DefaultBackendListenAddr
-		}
-		return adCore.SetAssetBaseURL(browserReachableLoopbackBaseURL(backendListenAddr) + ads.RoutePrefix)
-	}
-	refreshAdRuntime := func() {
-		runtimeState, err := adCore.GetRuntime(context.Background())
-		if err != nil {
-			return
-		}
-		app.Event.Emit(ads.EventUpdated, runtimeState)
-	}
-	refreshAd := func(ctx context.Context) {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		runtimeState, changed, err := adCore.Refresh(ctx)
-		if err != nil || !changed {
-			return
-		}
-		app.Event.Emit(ads.EventUpdated, runtimeState)
-	}
-	refreshAdAsync := func() {
-		go func() {
-			refreshAd(context.Background())
-		}()
-	}
-	startAdRefreshLoop := func(ctx context.Context) {
-		go func() {
-			refreshAd(ctx)
-			ticker := time.NewTicker(adRefreshInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					refreshAd(ctx)
-				}
-			}
-		}()
-	}
-
-	updateManager = updater.NewManager(app)
-
 	windowService.SetApp(app)
-	windowService.SetUpdater(updateManager)
 
 	mainWindow = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title: appName,
-		// lyh用cursor修改 2026-07-27：提高主窗口默认高度，确保主界面代理配置卡片无需滚动即可展示。
-		Width:               700,
+		// lyh用cursor修改 2026-03-14：缩小主窗口初始尺寸并同步最小宽度约束，确保启动时实际按 635×700 展示。
+		Width:               635,
 		Height:              750,
-		MinWidth:            640,
-		MinHeight:           480,
+		MinWidth:            635,
+		MinHeight:           750,
 		DisableResize:       false,
 		Frameless:           goruntime.GOOS == "windows",
 		URL:                 "/",
@@ -248,9 +141,6 @@ func Run(resources EmbeddedResources) error {
 		window.Hide()
 		e.Cancel()
 	})
-	window.RegisterHook(events.Common.WindowFocus, func(e *application.WindowEvent) {
-		refreshAdAsync()
-	})
 
 	showMainWindow := func() {
 		window.Show().Focus()
@@ -269,8 +159,10 @@ func Run(resources EmbeddedResources) error {
 	menu.AddSeparator()
 	startItem := menu.Add("启动服务")
 	stopItem := menu.Add("停止服务")
-	updateItem := menu.Add("检查更新").OnClick(func(ctx *application.Context) {
-		updateManager.CheckNow(true)
+	updateItem := menu.Add("查看上游更新").OnClick(func(ctx *application.Context) {
+		if err := windowService.OpenUpstreamReleases(); err != nil {
+			logger.Errorf("打开上游发布页失败: %v", err)
+		}
 	})
 	menu.AddSeparator()
 	showItem := menu.Add("显示窗口").OnClick(func(ctx *application.Context) {
@@ -315,28 +207,28 @@ func Run(resources EmbeddedResources) error {
 		if locale == "en-US" {
 			startItem.SetLabel("Start Service")
 			stopItem.SetLabel("Stop Service")
-			updateItem.SetLabel("Check for Updates")
+			updateItem.SetLabel("View Upstream Releases")
 			showItem.SetLabel("Show Window")
 			hideItem.SetLabel("Hide Window")
 			quitItem.SetLabel("Exit")
 		} else if locale == "ja-JP" {
 			startItem.SetLabel("サービス起動")
 			stopItem.SetLabel("サービス停止")
-			updateItem.SetLabel("アップデートを確認")
+			updateItem.SetLabel("アップストリームのリリースを表示")
 			showItem.SetLabel("ウィンドウを表示")
 			hideItem.SetLabel("ウィンドウを非表示")
 			quitItem.SetLabel("終了")
 		} else if locale == "ru-RU" {
 			startItem.SetLabel("Запустить сервис")
 			stopItem.SetLabel("Остановить сервис")
-			updateItem.SetLabel("Проверить обновления")
+			updateItem.SetLabel("Открыть релизы upstream")
 			showItem.SetLabel("Показать окно")
 			hideItem.SetLabel("Скрыть окно")
 			quitItem.SetLabel("Выход")
 		} else {
 			startItem.SetLabel("启动服务")
 			stopItem.SetLabel("停止服务")
-			updateItem.SetLabel("检查更新")
+			updateItem.SetLabel("查看上游更新")
 			showItem.SetLabel("显示窗口")
 			hideItem.SetLabel("隐藏窗口")
 			quitItem.SetLabel("退出")
@@ -353,9 +245,6 @@ func Run(resources EmbeddedResources) error {
 			stopItem.SetEnabled(false)
 		}
 		updateTrayLabels(currentLocale)
-		if refreshAdAssetBaseURL() {
-			refreshAdRuntime()
-		}
 	}
 
 	app.Event.On("locale:changed", func(e *application.CustomEvent) {
@@ -368,17 +257,12 @@ func Run(resources EmbeddedResources) error {
 	})
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(event *application.ApplicationEvent) {
 		logger.Infof("应用版本：v%s", buildinfo.CurrentVersion())
-		updateManager.Start()
-		startAdRefreshLoop(adRefreshCtx)
 		go func() {
 			logger.Infof("application started, begin auto start service in background")
 			if _, err := proxyService.StartProxy(); err != nil {
 				logger.Errorf("自动启动服务失败: %v", err)
 			} else {
 				state := proxyService.GetState()
-				if refreshAdAssetBaseURL() {
-					refreshAdRuntime()
-				}
 				logger.Infof("代理已自动启动: %s", state.ProxyListenAddr)
 			}
 		}()
@@ -387,8 +271,6 @@ func Run(resources EmbeddedResources) error {
 	startItem.OnClick(func(ctx *application.Context) {
 		if _, err := proxyService.StartProxy(); err != nil {
 			logger.Errorf("启动服务失败: %v", err)
-		} else if refreshAdAssetBaseURL() {
-			refreshAdRuntime()
 		}
 		refreshTray()
 	})
@@ -414,18 +296,6 @@ func Run(resources EmbeddedResources) error {
 	refreshTray()
 
 	return app.Run()
-}
-
-func browserReachableLoopbackBaseURL(listenAddr string) string {
-	host, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr))
-	if err != nil || strings.TrimSpace(port) == "" {
-		return "http://" + serverconfig.DefaultBackendListenAddr
-	}
-	host = strings.TrimSpace(host)
-	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
 }
 
 // logEmbeddedCAInfo 用于处理与 logEmbeddedCAInfo 相关的逻辑。

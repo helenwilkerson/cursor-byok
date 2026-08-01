@@ -92,21 +92,26 @@ onMounted(async () => {
           <div class="mt-1 text-sm text-[#a3a3a3]">
             启用后，本项目转发 Cursor 外网请求时会优先走该代理，不需要 v2rayN 开启系统全局代理
           </div>
-          <div class="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-            <Input
-              v-model="appState.outboundProxyURL"
-              :disabled="!appState.outboundProxyEnabled || appState.outboundProxyMode !== 'configured'"
-              placeholder="http://127.0.0.1:19808"
-            />
-            <Select
-              v-model="appState.outboundProxyMode"
-              :options="[
-                { label: '应用内代理', value: 'configured' },
-                { label: '跟随系统代理', value: 'system' },
-                { label: '直连', value: 'direct' },
-              ]"
-              placeholder="选择出口模式"
-            />
+          <!-- lyh用cursor修改 2026-03-14：压缩代理地址输入宽度并固定横向布局，避免配置窗口默认拆成两行。 -->
+          <div class="mt-3 flex flex-nowrap items-center gap-3">
+            <div class="w-[280px] min-w-0 shrink">
+              <Input
+                v-model="appState.outboundProxyURL"
+                :disabled="!appState.outboundProxyEnabled || appState.outboundProxyMode !== 'configured'"
+                placeholder="http://127.0.0.1:19808"
+              />
+            </div>
+            <div class="w-[200px] shrink-0">
+              <Select
+                v-model="appState.outboundProxyMode"
+                :options="[
+                  { label: '应用内代理', value: 'configured' },
+                  { label: '跟随系统代理', value: 'system' },
+                  { label: '直连', value: 'direct' },
+                ]"
+                placeholder="选择出口模式"
+              />
+            </div>
           </div>
           <div class="mt-2 text-xs text-[#8f8f8f]">
             当前出口：{{ appState.netProxyDescription || '尚未检测' }}

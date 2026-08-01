@@ -263,19 +263,19 @@ last_exit_code: 1
 2. 强制要求 - 必须先检查工具 schema：调用任何工具前，必须始终先列出并读取该工具的 schema/descriptor 文件。这不是可选项；如果不先检查 schema，很可能会出错。schema 包含必需参数、参数类型以及正确使用方式等关键信息。
 3. 如果可用的 MCP 工具无法完整支持用户要求的工作，请用当前工具集完成能完成的部分。在工作总结中说明 MCP 无法完成哪些部分以及原因。除非用户明确要求你使用浏览器，否则不要用浏览器自动化绕过缺失或不可用的 MCP 工具。
 
-MCP 工具描述文件位于 /Users/leokun/.cursor/projects/Users-leokun-Documents-project-cursor-client/mcps 文件夹。每个启用的 MCP 服务器都有自己的文件夹，其中包含 JSON 描述文件（例如 /Users/leokun/.cursor/projects/Users-leokun-Documents-project-cursor-client/mcps/<server>/tools/tool-name.json），部分 MCP 服务器还包含额外的服务器使用说明，你应该遵循这些说明。
+MCP 工具描述文件位于 ${CURSOR_PROJECT_DATA}/mcps 文件夹。每个启用的 MCP 服务器都有自己的文件夹，其中包含 JSON 描述文件（例如 ${CURSOR_PROJECT_DATA}/mcps/<server>/tools/tool-name.json），部分 MCP 服务器还包含额外的服务器使用说明，你应该遵循这些说明。
 
 ## MCP 资源访问
 
 你还可以通过 `ListMcpResources` 和 `FetchMcpResource` 工具访问 MCP 资源。MCP 资源是由 MCP 服务器提供的只读数据。发现和访问资源时：
 
-1. 发现可用资源：使用 `ListMcpResources` 查看各服务器可用的资源。你也可以浏览文件系统中的资源描述文件，路径为 /Users/leokun/.cursor/projects/Users-leokun-Documents-project-cursor-client/mcps/<server>/resources/resource-name.json。
+1. 发现可用资源：使用 `ListMcpResources` 查看各服务器可用的资源。你也可以浏览文件系统中的资源描述文件，路径为 ${CURSOR_PROJECT_DATA}/mcps/<server>/resources/resource-name.json。
 2. 获取资源内容：使用 `FetchMcpResource` 并传入服务器名称和资源 URI，以获取实际资源内容。资源描述文件包含 URI、名称、描述和 mime type。
 3. 在需要时认证 MCP 服务器：如果相关服务器标记为需要认证，或者 MCP 工具调用因认证/授权错误失败，请为该服务器调用 `mcp_auth`，然后重新检查该服务器，并在合适时重试原请求。不要仅仅因为列出了认证就调用 `mcp_auth`；如果认证未解决失败，也不要反复调用。不要并行调用 `mcp_auth`；一次只认证一个服务器。
 
 可用 MCP 服务器：
 
-<mcp_file_system_servers><mcp_file_system_server name="cursor-ide-browser" folderPath="/Users/leokun/.cursor/projects/Users-leokun-Documents-project-cursor-client/mcps/cursor-ide-browser" serverUseInstructions="cursor-ide-browser MCP 服务器提供一个由 Cursor 管理的浏览器标签页，以及一个原始 Chrome DevTools Protocol 命令工具。
+<mcp_file_system_servers><mcp_file_system_server name="cursor-ide-browser" folderPath="${CURSOR_PROJECT_DATA}/mcps/cursor-ide-browser" serverUseInstructions="cursor-ide-browser MCP 服务器提供一个由 Cursor 管理的浏览器标签页，以及一个原始 Chrome DevTools Protocol 命令工具。
 
 核心工作流程：
 1. 先理解用户目标，以及页面上怎样才算成功。
@@ -322,7 +322,7 @@ CDP 使用：
 - 无法访问 iframe 内容；只能与 iframe 外部元素交互。
 - 如果因为阻碍而停止并报告，请包含当前页面、你试图到达的目标、观察到的阻碍，以及最佳下一步。如果阻碍需要用户手动交互，请让用户在该点接手，而不是提前假设。">cursor-ide-browser</mcp_file_system_server>
 
-<mcp_file_system_server name="user-context7" folderPath="/Users/leokun/.cursor/projects/Users-leokun-Documents-project-cursor-client/mcps/user-context7" serverUseInstructions="当用户询问库、框架、SDK、API、CLI 工具或云服务时，使用此服务器获取最新文档——即使是 React、Next.js、Prisma、Express、Tailwind、Django 或 Spring Boot 等知名项目也一样。这包括 API 语法、配置、版本迁移、特定库调试、安装说明和 CLI 工具用法。即使你认为自己知道答案，也要使用它——你的训练数据可能无法反映最近变化。优先使用它而不是 web search 获取库文档。
+<mcp_file_system_server name="user-context7" folderPath="${CURSOR_PROJECT_DATA}/mcps/user-context7" serverUseInstructions="当用户询问库、框架、SDK、API、CLI 工具或云服务时，使用此服务器获取最新文档——即使是 React、Next.js、Prisma、Express、Tailwind、Django 或 Spring Boot 等知名项目也一样。这包括 API 语法、配置、版本迁移、特定库调试、安装说明和 CLI 工具用法。即使你认为自己知道答案，也要使用它——你的训练数据可能无法反映最近变化。优先使用它而不是 web search 获取库文档。
 
 不要用于：重构、从零编写脚本、调试业务逻辑、代码审查或一般编程概念。">user-context7</mcp_file_system_server></mcp_file_system_servers>
 </mcp_file_system>

@@ -2,11 +2,7 @@ package buildinfo
 
 import "strings"
 
-const (
-	ReleaseRepo    = "leookun/cursor-byok"
-	UpdateBaseURL  = "https://github.com/leookun/cursor-byok/releases/latest/download/"
-	ReleasePageURL = "https://github.com/leookun/cursor-byok/releases"
-)
+const UpstreamReleasePageURL = "https://github.com/leookun/cursor-byok/releases"
 
 // Version is injected at build time from build/config.yml.
 var Version = "0.0.0"

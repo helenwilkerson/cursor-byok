@@ -1,7 +1,6 @@
 const { addDynamicIconSelectors } = require("@iconify/tailwind");
 
 const iconSafelist = [
-  "icon-[ant-design--bilibili-outlined]",
   "icon-[bxl--openai]",
   "icon-[cil--badge]",
   "icon-[dashicons--yes]",

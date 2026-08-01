@@ -2,7 +2,7 @@
 
 > 中文版本：[CONTRIBUTING.md](./CONTRIBUTING.md)
 
-Thank you for considering contributing to cursor-byok!
+Thank you for considering contributing to cursor-byok! The project is maintained by `yhfx186`.
 
 ## Prerequisites
 

@@ -7,7 +7,6 @@ import Switch from "@/components/ui/Switch.vue";
 import HomeMetricsCard from "@/components/HomeMetricsCard.vue";
 import { useMessage } from "@/composables/useMessage";
 import { showModal } from "@/composables/useModal";
-import { getAdRuntime } from "@/services/clientApi";
 import {
   appState,
   appViewState,
@@ -16,12 +15,10 @@ import {
   saveOutboundProxyConfig,
   saveRoutingMode,
   syncHomeMetrics,
-  syncServiceState,
   toUserError,
   toggleService,
 } from "@/state/appState";
-import { Events } from "@wailsio/runtime";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
 
 const directModeEnabled = computed(() => appState.routingMode === "upstream");
 const outboundProxyModeOptions = [
@@ -30,67 +27,6 @@ const outboundProxyModeOptions = [
   { label: "直连", value: "direct" },
 ];
 const message = useMessage();
-const AD_UPDATED_EVENT = "ad:updated";
-const OPEN_AD_EVENT = "cursor:open-ad";
-
-const adRuntime = ref(null);
-let unsubscribeAdUpdated = null;
-
-function asString(value) {
-  if (typeof value === "string") {
-    return value.trim();
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return "";
-}
-
-function asBoolean(value) {
-  return value === true || value === "true" || value === 1 || value === "1";
-}
-
-const homeAds = computed(() => {
-  const runtime = adRuntime.value && typeof adRuntime.value === "object" ? adRuntime.value : {};
-  const slots = Array.isArray(runtime.slots) && runtime.slots.length > 0 ? runtime.slots : [runtime];
-  return slots
-    .map((slot, index) => {
-      const item = slot && typeof slot === "object" ? slot : {};
-      const home = item.home && typeof item.home === "object" ? item.home : {};
-      const title = asString(home.title);
-      if (
-        !title ||
-        !asBoolean(item.available) ||
-        !asBoolean(item.enabled) ||
-        !asString(item.packageHash)
-      ) {
-        return null;
-      }
-      return {
-        id: asString(item.id) || String(index + 1),
-        title,
-        subtitle: asString(home.subtitle),
-      };
-    })
-    .filter(Boolean);
-});
-
-async function syncAdRuntimeQuietly() {
-  try {
-    adRuntime.value = await getAdRuntime();
-  } catch (_error) {
-    adRuntime.value = null;
-  }
-}
-
-function handleAdUpdated() {
-  void syncAdRuntimeQuietly();
-}
-
-function handleOpenHomeAd(slotId) {
-  window.dispatchEvent(new CustomEvent(OPEN_AD_EVENT, { detail: { slotId: asString(slotId) } }));
-}
-
 async function showActionError(title, error) {
   await showModal({
     title,
@@ -102,16 +38,6 @@ async function handleToggleService() {
   const result = await toggleService();
   if (!result.ok) {
     await showActionError("服务操作失败", result.error);
-  }
-}
-
-async function handleRefreshState() {
-  const [serviceStateResult] = await Promise.allSettled([
-    syncServiceState(),
-    syncHomeMetrics(),
-  ]);
-  if (serviceStateResult.status === "rejected") {
-    await showActionError("刷新失败", toUserError(serviceStateResult.reason));
   }
 }
 
@@ -162,16 +88,6 @@ async function handleSaveOutboundProxy() {
   message.success("外网出口代理已保存");
 }
 
-onMounted(() => {
-  unsubscribeAdUpdated = Events.On(AD_UPDATED_EVENT, handleAdUpdated);
-  void syncAdRuntimeQuietly();
-});
-
-onBeforeUnmount(() => {
-  if (unsubscribeAdUpdated) {
-    unsubscribeAdUpdated();
-  }
-});
 </script>
 
 <template>
@@ -180,9 +96,7 @@ onBeforeUnmount(() => {
       :metrics="appState.homeMetrics"
       :loading="appState.homeMetricsLoading"
       :error="appState.homeMetricsError"
-      :home-ads="homeAds"
       @refresh="handleRefreshMetrics"
-      @open-ad="handleOpenHomeAd"
     />
 
     <Card>
@@ -235,18 +149,23 @@ onBeforeUnmount(() => {
           </Button>
         </div>
 
-        <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <Input
-            v-model="appState.outboundProxyURL"
-            :disabled="appState.configSaving || !appState.outboundProxyEnabled || appState.outboundProxyMode !== 'configured'"
-            placeholder="http://127.0.0.1:19808"
-          />
-          <Select
-            v-model="appState.outboundProxyMode"
-            :disabled="appState.configSaving"
-            :options="outboundProxyModeOptions"
-            placeholder="选择出口模式"
-          />
+        <!-- lyh用cursor修改 2026-03-14：压缩代理地址输入宽度并固定横向布局，便于同时查看和切换出口模式。 -->
+        <div class="flex flex-nowrap items-center gap-3">
+          <div class="w-[280px] min-w-0 shrink">
+            <Input
+              v-model="appState.outboundProxyURL"
+              :disabled="appState.configSaving || !appState.outboundProxyEnabled || appState.outboundProxyMode !== 'configured'"
+              placeholder="http://127.0.0.1:19808"
+            />
+          </div>
+          <div class="w-[200px] shrink-0">
+            <Select
+              v-model="appState.outboundProxyMode"
+              :disabled="appState.configSaving"
+              :options="outboundProxyModeOptions"
+              placeholder="选择出口模式"
+            />
+          </div>
         </div>
 
         <Switch

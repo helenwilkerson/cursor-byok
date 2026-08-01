@@ -141,12 +141,16 @@ tasks:
             ref: .DEV
           SCAN:
             ref: .SCAN
-      - rm -rf "{{.STAGING_DIR}}"
-      - mkdir -p "{{.STAGING_DIR}}"
-      - cp "{{.OUTPUT}}" "{{.STAGING_DIR}}/"
-      - (cd "{{.STAGING_DIR}}" && zip -qry "../{{.ZIP_NAME}}" .)
-      - rm -rf "{{.STAGING_DIR}}"
-      - rm -f "{{.OUTPUT}}"
+      - cmd: powershell -NoProfile -Command "Remove-Item -Recurse -Force '{{.STAGING_DIR}}' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force '{{.STAGING_DIR}}' | Out-Null; Copy-Item '{{.OUTPUT}}' '{{.STAGING_DIR}}/'; Compress-Archive -Path '{{.STAGING_DIR}}/*' -DestinationPath '{{.BIN_DIR}}/{{.ZIP_NAME}}' -Force; Remove-Item -Recurse -Force '{{.STAGING_DIR}}'; Remove-Item -Force '{{.OUTPUT}}'"
+        platforms: [windows]
+      - cmd: |-
+          rm -rf "{{.STAGING_DIR}}"
+          mkdir -p "{{.STAGING_DIR}}"
+          cp "{{.OUTPUT}}" "{{.STAGING_DIR}}/"
+          (cd "{{.STAGING_DIR}}" && zip -qry "../{{.ZIP_NAME}}" .)
+          rm -rf "{{.STAGING_DIR}}"
+          rm -f "{{.OUTPUT}}"
+        platforms: [darwin, linux]
 
   run:
     summary: 运行 Windows 可执行文件（仅在 Windows 可用）

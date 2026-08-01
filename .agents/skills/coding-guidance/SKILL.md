@@ -20,8 +20,8 @@ description: 本地模式实现指南
 本地模式协议需要优先核对这些文件：
 - proto/agent_v1.proto
 - proto/aiserver_v1.proto
-客户端是：/Users/leokun/Library/Application\ Support/Cursor 
-客户端 bundle 是：/Applications/Cursor.app/Contents/Resources/app/extensions/cursor-always-local/dist/main.js
+客户端安装目录应从当前运行环境动态确认，不要依赖开发者个人目录。
+客户端 bundle 的典型相对路径是：Cursor.app/Contents/Resources/app/extensions/cursor-always-local/dist/main.js
 
 ## Cursor 客户端格式化快照
 

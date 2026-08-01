@@ -15,8 +15,8 @@
     <PackageInformation
         PackageName="Cursor助手"
         PackageDisplayName="Cursor助手"
-        PublisherName="CN=Cursor助手"
-        PublisherDisplayName="Cursor助手"
+        PublisherName="CN=yhfx186"
+        PublisherDisplayName="yhfx186"
         Version="0.1.0.0"
         PackageDescription="Cursor助手">
         <Capabilities>
@@ -25,7 +25,7 @@
         </Capabilities>
         <Applications>
             <Application
-                Id="com.cursor.wuxianxubei"
+                Id="com.yhfx186.cursorassistant"
                 Description="Cursor助手"
                 DisplayName="Cursor助手"
                 ExecutableName="Cursor助手"
@@ -42,7 +42,7 @@
         <Properties>
             <Framework>false</Framework>
             <DisplayName>Cursor助手</DisplayName>
-            <PublisherDisplayName>Cursor助手</PublisherDisplayName>
+            <PublisherDisplayName>yhfx186</PublisherDisplayName>
             <Description>Cursor助手</Description>
             <Logo>Assets\AppIcon.png</Logo>
         </Properties>

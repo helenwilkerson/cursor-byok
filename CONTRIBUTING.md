@@ -2,7 +2,7 @@
 
 > English version: [CONTRIBUTING_EN.md](./CONTRIBUTING_EN.md)
 
-感谢你考虑为 cursor-byok 做出贡献！
+感谢你考虑为 cursor-byok 做出贡献！当前项目由 `yhfx186` 维护。
 
 ## 开发环境
 

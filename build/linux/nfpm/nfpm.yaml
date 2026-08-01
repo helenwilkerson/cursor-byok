@@ -10,9 +10,9 @@ version: "0.0.41"
 section: "default"
 priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
-description: "Cursor助手"
-vendor: "Cursor助手"
-homepage: "https://wails.io"
+description: "Cursor 助手｜自定义 API"
+vendor: "yhfx186"
+homepage: "https://github.com/yhfx186/cursor-byok"
 license: "MIT"
 release: "1"
 
@@ -54,9 +54,6 @@ scripts:
 #   - foobar
 # provides:
 #   - bar
-# depends:
-#   - gtk3
-#   - libwebkit2gtk
 # recommends:
 #   - whatever
 # suggests:
