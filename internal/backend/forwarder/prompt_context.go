@@ -9,6 +9,9 @@ import (
 	modeladapter "cursor/internal/backend/agent/model"
 )
 
+// lyh用cursor修改 2026-08-01：为 Cursor 命令回放分配独立上下文来源，避免与普通用户消息混淆
+const promptContextSourceSelectedCursorCommands = "selected_cursor_commands"
+
 func newPromptContextMessage(source string, message modeladapter.Message, persist bool) PromptContextMessage {
 	context := PromptContextMessage{
 		Source:  strings.TrimSpace(source),

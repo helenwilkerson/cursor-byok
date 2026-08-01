@@ -73,11 +73,14 @@ type compactionCandidateTurn struct {
 	EstimatedTokens int64
 }
 
+// maybeCompactBeforeProvider 在调用模型前评估自动或手动上下文压缩，并启动相应流程。
+// 参数 stream 表示活动请求流，conversation 表示持久化会话，compiled 表示已编译上下文；返回是否接管本轮及错误。
+// lyh用cursor修改 2026-08-01：从活动流读取已解析的 summarize 请求，避免手动压缩意图在模型调用前丢失
 func (service *Service) maybeCompactBeforeProvider(stream *ActiveStream, conversation *ConversationFile, compiled CompiledConversation) (bool, error) {
 	if service == nil || stream == nil || conversation == nil {
 		return false, nil
 	}
-	manualInstruction, manual := parseManualCompactionDirective(stream.LatestUserText)
+	manualInstruction, manual := streamManualCompactionDirective(stream)
 	plan, err := service.buildCompactionPlan(stream, conversation, compiled, manual, manualInstruction)
 	if err != nil {
 		return false, err
@@ -827,7 +830,7 @@ func buildFallbackCompactionSummary(plan *PendingCompaction) string {
 		sections = append(sections, "Compaction note:\n"+truncateCompactionText(plan.HookMessage, 800))
 	}
 	if strings.TrimSpace(plan.ManualInstruction) != "" {
-		sections = append(sections, "Manual compact instruction:\n"+truncateCompactionText(plan.ManualInstruction, 800))
+		sections = append(sections, "Manual summarize instruction:\n"+truncateCompactionText(plan.ManualInstruction, 800))
 	}
 	return strings.TrimSpace(truncateCompactionText(strings.Join(sections, "\n\n"), compactionSummaryMaxChars))
 }
@@ -875,13 +878,72 @@ func (service *Service) resolveCompactionReserveTokens(modelID string) int64 {
 	return compactionAutoReserveTokens
 }
 
+// parseManualCompactionRequest 从用户文本或所选 Cursor 命令中解析本轮手动压缩请求。
+// 参数 userMessage 表示当前用户消息；返回可选压缩说明及是否请求压缩。
+// lyh用cursor修改 2026-08-01：兼容 Cursor summarize 命令携带的压缩意图，避免只识别纯文本指令
+func parseManualCompactionRequest(userMessage *agentv1.UserMessage) (string, bool) {
+	if userMessage == nil {
+		return "", false
+	}
+	userText := strings.TrimSpace(userMessage.GetText())
+	if instruction, ok := parseManualCompactionDirective(userText); ok {
+		return instruction, true
+	}
+	if userText != "" {
+		return "", false
+	}
+	selectedContext := userMessage.GetSelectedContext()
+	if selectedContext == nil {
+		return "", false
+	}
+	for _, command := range selectedContext.GetCursorCommands() {
+		if !isCursorSummarizeCommand(command) {
+			continue
+		}
+		instruction, _ := parseManualCompactionDirective(command.GetContent())
+		return instruction, true
+	}
+	return "", false
+}
+
+// streamManualCompactionDirective 读取流中已解析的压缩请求，并兼容旧的用户文本指令。
+// 参数 stream 表示当前活动请求流；返回压缩说明及是否请求压缩。
+// lyh用cursor修改 2026-08-01：优先使用入站阶段持久化的压缩意图，避免请求处理阶段丢失 summarize 状态
+func streamManualCompactionDirective(stream *ActiveStream) (string, bool) {
+	if stream == nil {
+		return "", false
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.ManualCompaction.Requested {
+		return strings.TrimSpace(stream.ManualCompaction.Instruction), true
+	}
+	return parseManualCompactionDirective(stream.LatestUserText)
+}
+
+// isCursorSummarizeCommand 判断所选命令是否表示 Cursor 的上下文摘要操作。
+// 参数 command 表示客户端选中的 Cursor 命令；返回该命令是否应触发手动压缩。
+func isCursorSummarizeCommand(command *agentv1.SelectedCursorCommand) bool {
+	if command == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(command.GetName()), "glass-action-summarize") {
+		return true
+	}
+	_, ok := parseManualCompactionDirective(command.GetContent())
+	return ok
+}
+
+// parseManualCompactionDirective 解析用户可见的 /summarize 指令及其附加说明。
+// 参数 latestUserText 表示本轮用户文本；返回压缩说明及是否命中指令。
 func parseManualCompactionDirective(latestUserText string) (string, bool) {
 	trimmed := strings.TrimSpace(latestUserText)
+	const directive = "/summarize"
 	switch {
-	case trimmed == "/compact":
+	case trimmed == directive:
 		return "", true
-	case strings.HasPrefix(trimmed, "/compact "):
-		return strings.TrimSpace(strings.TrimPrefix(trimmed, "/compact")), true
+	case strings.HasPrefix(trimmed, directive+" "):
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, directive)), true
 	default:
 		return "", false
 	}

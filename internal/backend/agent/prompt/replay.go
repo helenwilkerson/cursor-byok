@@ -62,6 +62,49 @@ func buildUserReplayMessage(text string, selectedContext *agentv1.SelectedContex
 	}, true
 }
 
+// BuildSelectedCursorCommandsReplayMessage 将当前请求选中的 Cursor 命令转换为独立回放消息。
+// 参数 userMessage 表示包含 selected_context 的用户消息；返回消息及是否存在可回放命令。
+// 独立存储命令上下文可避免后端升级后改变历史 user_message 的模型可见语义。
+// lyh用cursor修改 2026-08-01：持久化 Cursor 命令真实内容，确保后续轮次可稳定回放命令上下文
+func BuildSelectedCursorCommandsReplayMessage(userMessage *agentv1.UserMessage) (Message, bool) {
+	if userMessage == nil {
+		return Message{}, false
+	}
+	content := buildSelectedCursorCommandsPromptSection(userMessage.GetSelectedContext())
+	if content == "" {
+		return Message{}, false
+	}
+	return Message{Role: "user", Content: content}, true
+}
+
+// buildSelectedCursorCommandsPromptSection 将所选命令编码为隔离的 XML 提示词区段。
+// 参数 selectedContext 表示客户端所选上下文；返回可供模型回放的命令区段。
+func buildSelectedCursorCommandsPromptSection(selectedContext *agentv1.SelectedContext) string {
+	if selectedContext == nil || len(selectedContext.GetCursorCommands()) == 0 {
+		return ""
+	}
+	entries := make([]string, 0, len(selectedContext.GetCursorCommands()))
+	for _, command := range selectedContext.GetCursorCommands() {
+		if command == nil {
+			continue
+		}
+		content := strings.TrimSpace(command.GetContent())
+		if content == "" {
+			continue
+		}
+		name := strings.TrimSpace(command.GetName())
+		if name == "" {
+			entries = append(entries, "<cursor_command>\n"+content+"\n</cursor_command>")
+			continue
+		}
+		entries = append(entries, fmt.Sprintf("<cursor_command name=\"%s\">\n%s\n</cursor_command>", escapePromptXML(name), content))
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	return "<cursor_commands>\n" + strings.Join(entries, "\n\n") + "\n</cursor_commands>"
+}
+
 func buildSelectedIDEStatePromptSection(selectedContext *agentv1.SelectedContext) string {
 	if selectedContext == nil || selectedContext.GetInvocationContext() == nil {
 		return ""

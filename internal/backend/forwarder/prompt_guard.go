@@ -18,6 +18,10 @@ const (
 	promptGuardSelectedFileChars        = 16000
 	promptGuardSelectedFilesTotalChars  = 64000
 	promptGuardSelectedFilesMaxCount    = 12
+	promptGuardCursorCommandNameChars   = 256
+	promptGuardCursorCommandChars       = 12000
+	promptGuardCursorCommandsTotalChars = 32000
+	promptGuardCursorCommandsMaxCount   = 8
 	promptGuardRequestFileChars         = 16000
 	promptGuardRequestFilesTotalChars   = 64000
 	promptGuardRequestFilesMaxCount     = 12
@@ -97,6 +101,9 @@ func guardCompiledConversationForProvider(compiled CompiledConversation) Compile
 	return compiled
 }
 
+// guardSelectedContext 克隆并裁剪用户所选文件、命令、技能和附加上下文，避免直接修改入站 protobuf。
+// 参数 selectedContext 表示客户端所选上下文；返回满足提示词大小约束的副本。
+// lyh用cursor修改 2026-08-01：将 Cursor 命令纳入统一提示词保护，避免未受限命令绕过上下文预算
 func guardSelectedContext(selectedContext *agentv1.SelectedContext) *agentv1.SelectedContext {
 	if selectedContext == nil {
 		return nil
@@ -106,9 +113,43 @@ func guardSelectedContext(selectedContext *agentv1.SelectedContext) *agentv1.Sel
 		return selectedContext
 	}
 	cloned.Files = guardSelectedFiles(cloned.GetFiles())
+	cloned.CursorCommands = guardSelectedCursorCommands(cloned.GetCursorCommands())
 	cloned.SelectedSkills = guardAgentSkills(cloned.GetSelectedSkills())
 	cloned.ExtraContext = guardStringSlice(cloned.GetExtraContext(), "selected_context.extra_context", promptGuardRealtimeTextChars, promptGuardRealtimeTextChars, promptGuardAgentSkillsMaxCount)
 	return cloned
+}
+
+// guardSelectedCursorCommands 克隆并限制所选 Cursor 命令的数量和文本规模，避免命令上下文挤占模型窗口。
+// 参数 commands 表示客户端选中的命令；返回可安全写入提示词的命令副本。
+// lyh用cursor修改 2026-08-01：限制 Cursor 命令回放体积，避免超长命令导致提示词异常膨胀
+func guardSelectedCursorCommands(commands []*agentv1.SelectedCursorCommand) []*agentv1.SelectedCursorCommand {
+	if len(commands) == 0 {
+		return nil
+	}
+	result := make([]*agentv1.SelectedCursorCommand, 0, minInt(len(commands), promptGuardCursorCommandsMaxCount))
+	remaining := promptGuardCursorCommandsTotalChars
+	for _, command := range commands {
+		if command == nil || len(result) >= promptGuardCursorCommandsMaxCount {
+			continue
+		}
+		content := strings.TrimSpace(command.GetContent())
+		if content == "" {
+			continue
+		}
+		limit := minInt(promptGuardCursorCommandChars, remaining)
+		if limit <= 0 {
+			break
+		}
+		cloned, ok := proto.Clone(command).(*agentv1.SelectedCursorCommand)
+		if !ok || cloned == nil {
+			continue
+		}
+		cloned.Name = truncatePromptGuardText("selected_context.cursor_commands.name", strings.TrimSpace(cloned.GetName()), promptGuardCursorCommandNameChars)
+		cloned.Content = truncatePromptGuardText("selected_context.cursor_commands.content", content, limit)
+		remaining -= promptGuardRuneCount(cloned.GetContent())
+		result = append(result, cloned)
+	}
+	return result
 }
 
 func guardSelectedFiles(files []*agentv1.SelectedFile) []*agentv1.SelectedFile {

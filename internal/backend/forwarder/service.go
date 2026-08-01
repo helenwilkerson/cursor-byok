@@ -23,6 +23,7 @@ import (
 	interactionbridge "cursor/internal/backend/agent/bridge/interaction"
 	runtimecore "cursor/internal/backend/agent/core"
 	modeladapter "cursor/internal/backend/agent/model"
+	promptengine "cursor/internal/backend/agent/prompt"
 	protocol "cursor/internal/backend/agent/protocol"
 )
 
@@ -672,6 +673,8 @@ func (service *Service) decodeInboundIntent(requestID string, message *agentv1.A
 	default:
 		return InboundIntent{}, fmt.Errorf("unsupported client message kind: %s", clientKind)
 	}
+	// lyh用cursor修改 2026-08-01：在入站解码阶段固化 summarize 意图，避免后续状态转换依赖原始消息结构
+	intent.ManualCompaction = resolveInboundManualCompaction(message, intent.UserMessage)
 	return intent, nil
 }
 
@@ -751,6 +754,8 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 	stream.mu.Lock()
 	stream.ThinkingEffort = strings.TrimSpace(intent.ThinkingEffort)
 	stream.SubagentModelOverrides = cloneSubagentModelOverrides(intent.SubagentModelOverrides)
+	// lyh用cursor修改 2026-08-01：把入站压缩指令绑定到活动流，确保并发处理阶段读取同一轮状态
+	stream.ManualCompaction = intent.ManualCompaction
 	stream.PendingProviderAction = providerActionNone
 	stream.PendingCompaction = nil
 	stream.PendingExecs = make(map[string]runtimecore.PendingExec)
@@ -788,6 +793,7 @@ func (service *Service) handleRunIntent(intent InboundIntent) error {
 		"subagent_model_override_count": len(intent.SubagentModelOverrides),
 		"subagent_model_overrides":      subagentModelOverrideSummaries(intent.SubagentModelOverrides),
 		"latest_user_text":              userMessageText(intent.UserMessage),
+		"manual_compaction_requested":   intent.ManualCompaction.Requested,
 	})
 	if err := service.publishCheckpoint(intent.RequestID, intent.ConversationID); err != nil {
 		return err
@@ -2332,7 +2338,8 @@ func buildRunEntries(intent InboundIntent, effectiveMode agentv1.AgentMode, turn
 		}
 	}
 	if intent.UserMessage != nil {
-		payload, err := protojson.Marshal(normalizeUserMessageForStorage(intent.UserMessage))
+		normalized := normalizeUserMessageForStorage(intent.UserMessage)
+		payload, err := protojson.Marshal(normalized)
 		if err != nil {
 			return nil, err
 		}
@@ -2343,6 +2350,14 @@ func buildRunEntries(intent InboundIntent, effectiveMode agentv1.AgentMode, turn
 			Kind:      "user_message",
 			Payload:   payload,
 		})
+		// lyh用cursor修改 2026-08-01：将所选 Cursor 命令单独写入历史上下文，确保后续模型轮次可重放真实命令内容
+		if commandMessage, ok := promptengine.BuildSelectedCursorCommandsReplayMessage(normalized); ok {
+			entries = append(entries, newPromptContextEntry(turnSeq, intent.RequestID, newPromptContextMessage(
+				promptContextSourceSelectedCursorCommands,
+				modeladapter.Message{Role: commandMessage.Role, Content: commandMessage.Content},
+				true,
+			)))
+		}
 	}
 	modeEntry, err := newModeMetadataEntry(turnSeq, intent.RequestID, effectiveMode, intent.HasExplicitMode, intent.ModeSource)
 	if err != nil {
@@ -2643,6 +2658,48 @@ func conversationActionIsResume(action *agentv1.ConversationAction) bool {
 	return ok
 }
 
+// inboundConversationAction 兼容从顶层消息或 run_request 中读取会话动作。
+// 参数 message 表示客户端入站消息；返回本轮会话动作，不存在时返回 nil。
+func inboundConversationAction(message *agentv1.AgentClientMessage) *agentv1.ConversationAction {
+	if message == nil {
+		return nil
+	}
+	if action := message.GetConversationAction(); action != nil {
+		return action
+	}
+	if runRequest := message.GetRunRequest(); runRequest != nil {
+		return runRequest.GetAction()
+	}
+	return nil
+}
+
+// conversationActionIsSummarize 判断会话动作是否请求 Cursor 原生摘要。
+// 参数 action 表示本轮会话动作；返回是否为 summarize 动作。
+func conversationActionIsSummarize(action *agentv1.ConversationAction) bool {
+	if action == nil {
+		return false
+	}
+	_, ok := action.GetAction().(*agentv1.ConversationAction_SummarizeAction)
+	return ok
+}
+
+// resolveInboundManualCompaction 汇总会话动作和用户消息中的压缩意图。
+// 参数 message 表示完整入站消息，userMessage 表示归一化用户消息；返回本轮压缩指令。
+// lyh用cursor修改 2026-08-01：统一解析 Cursor summarize 动作与文本指令，确保压缩状态进入活动流
+func resolveInboundManualCompaction(message *agentv1.AgentClientMessage, userMessage *agentv1.UserMessage) manualCompactionDirective {
+	instruction, requested := parseManualCompactionRequest(userMessage)
+	if conversationActionIsSummarize(inboundConversationAction(message)) {
+		requested = true
+	}
+	return manualCompactionDirective{
+		Requested:   requested,
+		Instruction: instruction,
+	}
+}
+
+// conversationActionStartsRun 判断会话动作是否需要启动完整模型处理流程。
+// 参数 action 表示本轮会话动作；返回是否应创建或继续活动请求流。
+// lyh用cursor修改 2026-08-01：将 Cursor summarize 动作纳入运行入口，使原生摘要请求可进入压缩流程
 func conversationActionStartsRun(action *agentv1.ConversationAction) bool {
 	if action == nil {
 		return false
@@ -2650,6 +2707,7 @@ func conversationActionStartsRun(action *agentv1.ConversationAction) bool {
 	switch action.GetAction().(type) {
 	case *agentv1.ConversationAction_UserMessageAction,
 		*agentv1.ConversationAction_ResumeAction,
+		*agentv1.ConversationAction_SummarizeAction,
 		*agentv1.ConversationAction_StartPlanAction,
 		*agentv1.ConversationAction_ExecutePlanAction:
 		return true

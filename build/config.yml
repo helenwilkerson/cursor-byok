@@ -4,11 +4,12 @@ version: "3"
 info:
   companyName: "yhfx186"
   productName: "Cursor助手"
+  # lyh用cursor修改 2026-08-01：同步 0.0.42 稳定性修复时保留 fork 独立应用标识与维护者信息
   productIdentifier: "com.yhfx186.cursorassistant"
   description: "Cursor 助手｜自定义 API"
   copyright: "© 2026, yhfx186"
   comments: "作者 yhfx186"
-  version: "0.0.41"
+  version: "0.0.42"
 
 dev_mode:
   root_path: .
