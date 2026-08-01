@@ -5,12 +5,14 @@ import {
   getHomeMetricsSummary,
   getModelAdapterTestResults,
   getProxyState,
+  getStartupStatus,
   openConfigWindow as openConfig,
   loadUserConfig,
   openLogsDirectory,
   openModelConfig,
   openModelEditor,
   saveUserConfig,
+  setStartupEnabled as persistStartupEnabled,
   startProxyService,
   stopProxyService,
   testModelAdapter,
@@ -710,6 +712,23 @@ async function persistConfigPayload(config, { modelAdaptersOnly = false } = {}) 
   }
 }
 
+// lyh用cursor修改 2026-08-01：将系统启动项响应统一映射为界面状态，确保开关始终展示后端实际结果。
+/**
+ * 应用后端返回的开机启动状态。
+ * @param {Object} source 后端返回的平台支持状态和实际启用状态。
+ * @returns {{supported: boolean, enabled: boolean}} 返回归一化后的开机启动状态。
+ */
+function applyStartupStatus(source) {
+  const status = source && typeof source === "object" ? source : {};
+  const normalized = {
+    supported: asBoolean(status.supported),
+    enabled: asBoolean(status.enabled),
+  };
+  appState.startupSupported = normalized.supported;
+  appState.startupEnabled = normalized.enabled;
+  return normalized;
+}
+
 function applyProxyState(raw) {
   const state = raw && typeof raw === "object" ? raw : {};
   appState.backendRunning = asBoolean(state.backendRunning);
@@ -780,6 +799,10 @@ const cachedConfig = normalizeConfig(cachedState);
 
 export const appState = reactive({
   appVersion: "",
+  // lyh用cursor修改 2026-08-01：单独保存系统启动项运行态，不将平台状态混入用户业务配置。
+  startupSupported: false,
+  startupEnabled: false,
+  startupBusy: true,
   modelAdapters: cachedConfig.modelAdapters,
   modelAdapterTestResults: {},
   configBackendListenAddr: cachedConfig.backendListenAddr,
@@ -1220,6 +1243,41 @@ export async function toggleService() {
   return startService();
 }
 
+// lyh用cursor修改 2026-08-01：初始化时读取操作系统启动项，避免依赖可能过期的本地页面缓存。
+/**
+ * 从桌面后端同步当前程序的开机启动状态。
+ * @returns {Promise<{supported: boolean, enabled: boolean}>} 返回操作系统中的实际状态。
+ */
+export async function syncStartupStatus() {
+  appState.startupBusy = true;
+  try {
+    return applyStartupStatus(await getStartupStatus());
+  } finally {
+    appState.startupBusy = false;
+  }
+}
+
+// lyh用cursor修改 2026-08-01：切换后采用后端返回状态更新界面，失败时保留原状态并交由页面提示。
+/**
+ * 添加或删除当前程序的开机启动项。
+ * @param {boolean} enabled 用户期望的开机启动状态。
+ * @returns {Promise<{ok: boolean, error: string}>} 返回切换结果，失败时包含可展示的错误信息。
+ */
+export async function updateStartupEnabled(enabled) {
+  if (appState.startupBusy) {
+    return { ok: false, error: "开机启动状态更新中，请稍后再试" };
+  }
+  appState.startupBusy = true;
+  try {
+    applyStartupStatus(await persistStartupEnabled(asBoolean(enabled)));
+    return { ok: true, error: "" };
+  } catch (error) {
+    return { ok: false, error: toUserError(error) };
+  } finally {
+    appState.startupBusy = false;
+  }
+}
+
 export async function openLocalLogsDirectory() {
   await openLogsDirectory();
 }
@@ -1242,6 +1300,11 @@ export function toUserError(error) {
   return message || GENERIC_SERVICE_ERROR;
 }
 
+// lyh用cursor修改 2026-08-01：应用初始化时同步开机启动状态，使主界面开关反映 Windows 注册表实际值。
+/**
+ * 初始化主界面依赖的配置、服务、指标及操作系统状态。
+ * 单项读取失败时保留其他功能可用，不阻塞应用界面启动。
+ */
 export async function bootstrapAppState() {
   try {
     await reloadUserConfig();
@@ -1255,5 +1318,6 @@ export async function bootstrapAppState() {
     appState.appVersion = "";
   }
   await syncServiceState().catch(() => {});
+  await syncStartupStatus().catch(() => {});
   await syncHomeMetrics().catch(() => {});
 }

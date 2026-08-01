@@ -24,5 +24,8 @@ cmd/ads-server/data/
 cmd/ads-server/ads-server
 cmd/ads-server/ads-server-linux-amd64.tar
 cursor-tab-server/cursor-tab-server-linux-amd64.tar
+# lyh用cursor修改 2026-08-01：忽略本地运行配置和交叉编译产物，避免 Cursor Token 与 Linux 二进制进入版本库。
+cursor-tab-server/config.yaml
+cursor-tab-server/dist/
 .cursor
 build

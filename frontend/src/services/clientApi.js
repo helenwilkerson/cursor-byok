@@ -19,6 +19,7 @@ import { Call } from "@wailsio/runtime";
 
 const API_LOG_PREFIX = "[clientApi]";
 const PROXY_SERVICE_NAME = "cursor/internal/bridge.ProxyService";
+const STARTUP_SERVICE_NAME = "cursor/internal/bridge.StartupService";
 
 function logSuccess(name, payload, result) {
   console.log(`${API_LOG_PREFIX} ${name} response`, {
@@ -57,6 +58,29 @@ export function saveUserConfig(payload) {
 
 export function getProxyState() {
   return withApiLogging("GetState", undefined, () => GetState());
+}
+
+// lyh用cursor修改 2026-08-01：通过桌面桥接读取真实启动项状态，避免前端缓存与 Windows 设置不一致。
+/**
+ * 读取当前程序的开机启动状态。
+ * @returns {Promise<{supported: boolean, enabled: boolean}>} 返回平台支持状态和系统中的实际启用状态。
+ */
+export function getStartupStatus() {
+  return withApiLogging("GetStartupStatus", undefined, () =>
+    Call.ByName(`${STARTUP_SERVICE_NAME}.GetStatus`),
+  );
+}
+
+// lyh用cursor修改 2026-08-01：由后端统一增删 Windows 启动项，避免浏览器界面直接承担平台操作。
+/**
+ * 设置当前程序是否随系统登录自动启动。
+ * @param {boolean} enabled 是否添加当前用户的开机启动项。
+ * @returns {Promise<{supported: boolean, enabled: boolean}>} 返回操作后的系统实际状态。
+ */
+export function setStartupEnabled(enabled) {
+  return withApiLogging("SetStartupEnabled", { enabled }, () =>
+    Call.ByName(`${STARTUP_SERVICE_NAME}.SetEnabled`, enabled),
+  );
 }
 
 export function getHomeMetricsSummary() {

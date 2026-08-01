@@ -17,10 +17,14 @@ import {
   syncHomeMetrics,
   toUserError,
   toggleService,
+  updateStartupEnabled,
 } from "@/state/appState";
 import { computed } from "vue";
 
 const directModeEnabled = computed(() => appState.routingMode === "upstream");
+const startupDisabledText = computed(() =>
+  appState.startupSupported ? "已关闭开机启动" : "当前系统暂不支持开机启动",
+);
 const outboundProxyModeOptions = [
   { label: "应用内代理", value: "configured" },
   { label: "跟随系统代理", value: "system" },
@@ -68,6 +72,20 @@ async function handleDirectModeChange(enabled) {
     return;
   }
   message.success(enabled ? "已切换到直连 Cursor 模式" : "已切换到本地服务模式");
+}
+
+// lyh用cursor修改 2026-08-01：主界面直接控制当前用户启动项，让用户无需手动编辑 Windows 注册表。
+/**
+ * 根据用户选择添加或删除当前程序的开机启动项。
+ * @param {boolean} enabled 用户期望的开机启动状态。
+ */
+async function handleStartupChange(enabled) {
+  const result = await updateStartupEnabled(enabled);
+  if (!result.ok) {
+    await showActionError("开机启动设置失败", result.error);
+    return;
+  }
+  message.success(enabled ? "已添加到开机启动" : "已从开机启动中移除");
 }
 
 // lyh用cursor修改 2026-07-27：主界面直接保存出口代理配置，避免用户只看到缓存命中率而找不到 v2rayN 代理入口。
@@ -131,6 +149,21 @@ async function handleSaveOutboundProxy() {
           :disabled="appState.configSaving"
           @change="handleDirectModeChange"
         />
+
+        <!-- lyh用cursor修改 2026-08-01：在主界面提供开机启动开关，并明确开机时仅后台驻留托盘。 -->
+        <div class="border-t border-[#3f3f3f] pt-3">
+          <Switch
+            label="开机启动"
+            description="开启后随 Windows 登录自动运行，并在后台驻留系统托盘"
+            enabled-text="已添加到开机启动"
+            :disabled-text="startupDisabledText"
+            busy-text="正在读取开机启动状态..."
+            :enabled="appState.startupEnabled"
+            :busy="appState.startupBusy"
+            :disabled="appState.startupBusy || !appState.startupSupported"
+            @change="handleStartupChange"
+          />
+        </div>
       </div>
     </Card>
 

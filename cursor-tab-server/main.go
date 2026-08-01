@@ -19,9 +19,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// lyh用cursor修改 2026-08-01：集中声明宝塔部署环境变量和健康检查路径，避免运行参数散落在启动逻辑中。
 const (
 	defaultConfigPath = "./config.yaml"
-	defaultListenAddr = ":8041"
+	defaultListenAddr = "127.0.0.1:8041"
+	healthPath        = "/healthz"
+	envConfigPath     = "CURSOR_TAB_CONFIG"
+	envListenAddr     = "CURSOR_TAB_LISTEN_ADDR"
+	envToken          = "CURSOR_TAB_TOKEN"
 )
 
 var hopByHopHeaders = map[string]struct{}{
@@ -57,8 +62,11 @@ var defaultUpstreamTargets = map[string]string{
 	"/aiserver.v1.DashboardService/GetEffectiveUserPlugins": "https://api2.cursor.sh:443/aiserver.v1.DashboardService/GetEffectiveUserPlugins",
 }
 
+// appConfig 表示服务启动所需的 Cursor 凭据和本地监听地址。
+// lyh用cursor修改 2026-08-01：扩展 YAML 配置结构，使宝塔可配置回环监听地址。
 type appConfig struct {
-	Token string
+	Token      string `yaml:"token"`
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 type serverApp struct {
@@ -67,15 +75,18 @@ type serverApp struct {
 	upstreamTargets map[string]string
 }
 
+// main 加载宝塔或本地运行配置，并启动 Cursor Tab HTTP 转发服务。
+// lyh用cursor修改 2026-08-01：允许宝塔通过环境变量注入运行配置，并默认仅监听回环地址以避免服务端口直接暴露。
 func main() {
-	cfg, err := loadConfig(defaultConfigPath)
+	configPath := resolveConfigPath(os.Getenv)
+	cfg, err := loadConfig(configPath, os.Getenv)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("cursor-tab-server 启动 listen_addr=%s config_path=%s", defaultListenAddr, defaultConfigPath)
+	log.Printf("cursor-tab-server 启动 listen_addr=%s config_path=%s", cfg.ListenAddr, configPath)
 	server := &http.Server{
-		Addr:              defaultListenAddr,
+		Addr:              cfg.ListenAddr,
 		Handler:           newServerApp(cfg, newHTTPClient(), defaultUpstreamTargets),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -97,7 +108,23 @@ func newServerApp(cfg appConfig, client *http.Client, upstreamTargets map[string
 	return app
 }
 
+// ServeHTTP 提供健康检查并将已登记的 Cursor Tab 请求转发到对应官方上游。
+// writer 用于返回健康状态或上游响应；request 表示调用方提交的 HTTP 请求。
+// lyh用cursor修改 2026-08-01：增加不访问上游的健康检查端点，供宝塔监控服务存活状态。
 func (app *serverApp) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == healthPath {
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		if request.Method != http.MethodHead {
+			_, _ = writer.Write([]byte("ok"))
+		}
+		return
+	}
 	if err := app.handleProxy(writer, request); err != nil {
 		http.Error(writer, err.Error(), http.StatusBadGateway)
 	}
@@ -155,28 +182,48 @@ func (app *serverApp) handleProxy(writer http.ResponseWriter, request *http.Requ
 	return err
 }
 
-func loadConfig(path string) (appConfig, error) {
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return appConfig{}, err
+// resolveConfigPath 确定运行时 YAML 配置路径，供宝塔环境变量覆盖默认工作目录配置。
+// getenv 用于读取环境变量；返回实际应读取的配置文件路径。
+func resolveConfigPath(getenv func(string) string) string {
+	if getenv != nil {
+		if path := strings.TrimSpace(getenv(envConfigPath)); path != "" {
+			return path
+		}
 	}
-	token, err := parseTokenYAML(contents)
-	if err != nil {
-		return appConfig{}, err
-	}
-	return appConfig{Token: token}, nil
+	return defaultConfigPath
 }
 
-func parseTokenYAML(contents []byte) (string, error) {
-	var cfg appConfig
-	if err := yaml.Unmarshal(contents, &cfg); err != nil {
-		return "", fmt.Errorf("解析配置失败: %w", err)
+// loadConfig 合并 YAML 与环境变量配置，环境变量优先，允许宝塔仅通过环境变量启动服务。
+// path 表示 YAML 配置文件路径；getenv 用于读取宝塔注入的环境变量；返回完成校验的运行配置。
+// lyh用cursor修改 2026-08-01：统一配置优先级并允许省略 YAML，避免部署时必须上传包含 Cursor Token 的文件。
+func loadConfig(path string, getenv func(string) string) (appConfig, error) {
+	cfg := appConfig{ListenAddr: defaultListenAddr}
+	contents, err := os.ReadFile(path)
+	if err == nil {
+		if err := yaml.Unmarshal(contents, &cfg); err != nil {
+			return appConfig{}, fmt.Errorf("解析配置失败: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return appConfig{}, fmt.Errorf("读取配置失败: %w", err)
 	}
-	token := strings.TrimSpace(cfg.Token)
-	if token == "" {
-		return "", fmt.Errorf("token 不能为空")
+
+	if getenv != nil {
+		if token := strings.TrimSpace(getenv(envToken)); token != "" {
+			cfg.Token = token
+		}
+		if listenAddr := strings.TrimSpace(getenv(envListenAddr)); listenAddr != "" {
+			cfg.ListenAddr = listenAddr
+		}
 	}
-	return token, nil
+	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.ListenAddr = strings.TrimSpace(cfg.ListenAddr)
+	if cfg.Token == "" {
+		return appConfig{}, fmt.Errorf("token 不能为空，请设置 %s 或在配置文件中填写 token", envToken)
+	}
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = defaultListenAddr
+	}
+	return cfg, nil
 }
 
 func copyRequestHeaders(target http.Header, source http.Header) {

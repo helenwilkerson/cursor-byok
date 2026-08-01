@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"cursor/internal/autostart"
 	serverconfig "cursor/internal/backend/server/config"
 	"cursor/internal/buildinfo"
 
@@ -66,6 +67,8 @@ func Run(resources EmbeddedResources) error {
 	proxyService := bridge.NewProxyService(proxyServer, certManager, embeddedCACertPEM)
 	metricsService := bridge.NewMetricsService()
 	windowService := bridge.NewWindowService()
+	// lyh用cursor修改 2026-08-01：独立注册开机启动桥接服务，保持系统设置与代理业务解耦。
+	startupService := bridge.NewStartupService()
 
 	var mainWindow *application.WebviewWindow
 
@@ -76,6 +79,8 @@ func Run(resources EmbeddedResources) error {
 			application.NewService(proxyService),
 			application.NewService(metricsService),
 			application.NewService(windowService),
+			// lyh用cursor修改 2026-08-01：向前端暴露启动项状态读取与切换接口。
+			application.NewService(startupService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(resources.Assets),
@@ -101,14 +106,15 @@ func Run(resources EmbeddedResources) error {
 	mainWindow = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title: appName,
 		// lyh用cursor修改 2026-03-14：缩小主窗口初始尺寸并同步最小宽度约束，确保启动时实际按 635×700 展示。
-		Width:               635,
-		Height:              750,
-		MinWidth:            635,
-		MinHeight:           750,
-		DisableResize:       false,
-		Frameless:           goruntime.GOOS == "windows",
-		URL:                 "/",
-		Hidden:              false,
+		Width:         635,
+		Height:        820,
+		MinWidth:      635,
+		MinHeight:     820,
+		DisableResize: false,
+		Frameless:     goruntime.GOOS == "windows",
+		URL:           "/",
+		// lyh用cursor修改 2026-08-01：开机启动时隐藏主窗口并驻留托盘，避免用户登录后被窗口打断。
+		Hidden:              autostart.IsLaunch(),
 		HideOnEscape:        false,
 		MinimiseButtonState: application.ButtonEnabled,
 		MaximiseButtonState: application.ButtonEnabled,

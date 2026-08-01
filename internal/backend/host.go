@@ -23,7 +23,7 @@ import (
 
 const healthPath = "/healthz"
 
-const tabServerBaseURL = "https://tab.leokun.cn"
+const tabServerBaseURL = "https://cursortabserver.huazai186.com"
 
 type Host struct {
 	store      *serverconfig.Store
